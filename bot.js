@@ -30,7 +30,7 @@ const client = new Client({
 // In-memory toggle (global)
 let notificationsEnabled = true;
 
-// Slash commands with attractive descriptions
+// Slash commands with stylish descriptions
 const commands = [
   new SlashCommandBuilder()
     .setName("vcstatus")
@@ -63,26 +63,30 @@ client.once("ready", async () => {
   }
 });
 
-// Handle voice join events
+// Handle voice join/leave events
 client.on("voiceStateUpdate", async (oldState, newState) => {
   if (!notificationsEnabled) return;
+
+  const user = newState.member?.user || oldState.member?.user;
+  if (!user || user.bot) return;
+
+  const IGNORED_IDS = new Set(["684773505157431347", "1190991820637868042"]);
+  if (IGNORED_IDS.has(user.id)) return;
+
+  let textChannel;
+  try {
+    textChannel = await client.channels.fetch(process.env.TEXT_CHANNEL_ID);
+  } catch {
+    return;
+  }
+
+  if (!textChannel?.send) return;
+
+  let embed;
+
+  // User joined a voice channel
   if (!oldState.channel && newState.channel) {
-    const user = newState.member?.user;
-    if (!user || user.bot) return;
-
-    const IGNORED_IDS = new Set(["684773505157431347", "1190991820637868042"]);
-    if (IGNORED_IDS.has(user.id)) return;
-
-    let textChannel;
-    try {
-      textChannel = await client.channels.fetch(process.env.TEXT_CHANNEL_ID);
-    } catch {
-      return;
-    }
-
-    if (!textChannel?.send) return;
-
-    const embed = new EmbedBuilder()
+    embed = new EmbedBuilder()
       .setColor(0x00ffcc)
       .setAuthor({
         name: `${user.username} just popped in! 🔊`,
@@ -94,17 +98,36 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         iconURL: client.user.displayAvatarURL()
       })
       .setTimestamp();
+  }
 
+  // User left a voice channel
+  else if (oldState.channel && !newState.channel) {
+    embed = new EmbedBuilder()
+      .setColor(0xff5e5e)
+      .setAuthor({
+        name: `${user.username} dipped out! 🚪`,
+        iconURL: user.displayAvatarURL({ dynamic: true, size: 512 })
+      })
+      .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
+      .setFooter({
+        text: "💨 Gone but not forgotten.",
+        iconURL: client.user.displayAvatarURL()
+      })
+      .setTimestamp();
+  }
+
+  // Only send if there's a valid embed
+  if (embed) {
     try {
       const message = await textChannel.send({ embeds: [embed] });
       setTimeout(() => message.delete().catch(() => {}), 30_000);
     } catch (err) {
-      console.error("❌ Failed to send voice join embed:", err);
+      console.error("❌ Failed to send voice update embed:", err);
     }
   }
 });
 
-// Handle slash commands
+// Handle slash command interactions
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
