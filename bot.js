@@ -13,7 +13,9 @@ require("dotenv").config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get("/", (_, res) => res.send("✅ Bot is alive and vibing!"));
+app.get("/", (_, res) => {
+  res.status(200).json({ status: "✅ Bot is alive and vibing!" });
+});
 app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
 // Create Discord client
