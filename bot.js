@@ -27,25 +27,25 @@ const client = new Client({
   partials: [Partials.User, Partials.GuildMember],
 });
 
-// In-memory toggle (global)
+// Global toggle for alerts
 let notificationsEnabled = true;
 
-// Slash commands with stylish descriptions
+// Slash commands
 const commands = [
   new SlashCommandBuilder()
     .setName("vcstatus")
-    .setDescription("🔍 Check whether voice join alerts are active or chillin'."),
+    .setDescription("📡 Want the scoop? Check if voice notifications are ON or snoozin'."),
 
   new SlashCommandBuilder()
     .setName("vcon")
-    .setDescription("🔔 Turn ON voice channel join alerts — let the vibes roll!"),
+    .setDescription("🚀 Fire it up! Activate voice join alerts and welcome the crew in style."),
 
   new SlashCommandBuilder()
     .setName("vcoff")
-    .setDescription("🔕 Turn OFF voice channel join alerts — take a break from the noise.")
+    .setDescription("🛑 Power down! Silence the voice join alerts and keep things chill.")
 ].map(cmd => cmd.toJSON());
 
-// Register slash commands at startup
+// Register slash commands
 client.once("ready", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
 
@@ -63,7 +63,7 @@ client.once("ready", async () => {
   }
 });
 
-// Handle voice join/leave events
+// Voice join/leave detection
 client.on("voiceStateUpdate", async (oldState, newState) => {
   if (!notificationsEnabled) return;
 
@@ -84,7 +84,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
   let embed;
 
-  // User joined a voice channel
+  // Joined VC
   if (!oldState.channel && newState.channel) {
     embed = new EmbedBuilder()
       .setColor(0x00ffcc)
@@ -100,7 +100,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       .setTimestamp();
   }
 
-  // User left a voice channel
+  // Left VC
   else if (oldState.channel && !newState.channel) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
@@ -116,18 +116,17 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       .setTimestamp();
   }
 
-  // Only send if there's a valid embed
   if (embed) {
     try {
       const message = await textChannel.send({ embeds: [embed] });
       setTimeout(() => message.delete().catch(() => {}), 30_000);
     } catch (err) {
-      console.error("❌ Failed to send voice update embed:", err);
+      console.error("❌ Failed to send embed:", err);
     }
   }
 });
 
-// Handle slash command interactions
+// Slash command logic
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -136,7 +135,7 @@ client.on("interactionCreate", async (interaction) => {
   switch (commandName) {
     case "vcstatus":
       await interaction.reply({
-        content: `🔔 Voice notifications are currently **${notificationsEnabled ? "ENABLED" : "DISABLED"}**.`,
+        content: `📡 **VC Alert Status**\nVoice notifications are currently **${notificationsEnabled ? "🟢 ENABLED" : "🔴 DISABLED"}**.\n\nUse \`/vcon\` or \`/vcoff\` to toggle the vibe!`,
         ephemeral: true
       });
       break;
@@ -144,7 +143,7 @@ client.on("interactionCreate", async (interaction) => {
     case "vcon":
       notificationsEnabled = true;
       await interaction.reply({
-        content: "✅ Voice join notifications have been **ENABLED**. Let the party begin!",
+        content: "✅ **VC Join Alerts ENABLED**\nLet the party begin! 🎉 Users joining voice channels will now be announced with style.",
         ephemeral: true
       });
       break;
@@ -152,7 +151,7 @@ client.on("interactionCreate", async (interaction) => {
     case "vcoff":
       notificationsEnabled = false;
       await interaction.reply({
-        content: "🔕 Voice join notifications have been **DISABLED**. Silence mode on.",
+        content: "🔕 **VC Join Alerts DISABLED**\nPeace and quiet restored. 🌙 No more join messages until you say so.",
         ephemeral: true
       });
       break;
