@@ -93,8 +93,8 @@ const buildEmbedReply = (title, description, color) => {
 client.on("interactionCreate", async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const { commandName, guildId, channelId, options } = interaction;
-
     if (!guildId) return;
+
     let settings = await GuildSettings.findOne({ guildId });
     if (!settings) {
       settings = new GuildSettings({ guildId });
@@ -103,31 +103,38 @@ client.on("interactionCreate", async (interaction) => {
 
     switch (commandName) {
       case "vcstatus": {
-        const embed = buildEmbedReply(
-          "📡 VC Alert Status",
-          `Voice notifications are currently **${settings.alertsEnabled ? "🟢 ENABLED" : "🔴 DISABLED"}**.\n\nUse \`/vcon\` or \`/vcoff\` to control the vibe.`,
-          settings.alertsEnabled ? 0x00ff88 : 0xff4444
+        const embed = new EmbedBuilder()
+          .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
+          .setAuthor({
+            name: "🎛️ VC Alert Control Panel",
+            iconURL: client.user.displayAvatarURL()
+          })
+          .setDescription(
+            `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
+            `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
+            `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
+            `Use the buttons below to customize your settings on the fly! ⚙️`
+          )
+          .setFooter({ text: `Server ID: ${guildId}`, iconURL: client.user.displayAvatarURL() })
+          .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("toggle_autodelete")
+            .setEmoji("🧹")
+            .setLabel(settings.autoDelete ? "Auto-Delete: ON" : "Auto-Delete: OFF")
+            .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+
+          new ButtonBuilder()
+            .setCustomId("toggle_leavealerts")
+            .setEmoji("🚪")
+            .setLabel(settings.leaveAlerts ? "Leave Alerts: ON" : "Leave Alerts: OFF")
+            .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
         );
-
-        const components = [];
-        if (settings.alertsEnabled) {
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId("toggle_autodelete")
-              .setLabel(settings.autoDelete ? "🔁 Turn OFF Auto-Delete" : "🧹 Turn ON Auto-Delete")
-              .setStyle(settings.autoDelete ? ButtonStyle.Danger : ButtonStyle.Success),
-
-            new ButtonBuilder()
-              .setCustomId("toggle_leavealerts")
-              .setLabel(settings.leaveAlerts ? "🙈 Turn OFF Leave Alerts" : "🚪 Turn ON Leave Alerts")
-              .setStyle(settings.leaveAlerts ? ButtonStyle.Secondary : ButtonStyle.Primary)
-          );
-          components.push(row);
-        }
 
         await interaction.reply({
           embeds: [embed],
-          components,
+          components: settings.alertsEnabled ? [row] : [],
           ephemeral: true
         });
         break;
@@ -199,7 +206,6 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
-  // Button interaction
   if (interaction.isButton()) {
     const { guildId, customId } = interaction;
     const settings = await GuildSettings.findOne({ guildId });
@@ -212,22 +218,32 @@ client.on("interactionCreate", async (interaction) => {
     }
     await settings.save();
 
-    // Update embed
-    const embed = buildEmbedReply(
-      "📡 VC Alert Status",
-      `Voice notifications are currently **${settings.alertsEnabled ? "🟢 ENABLED" : "🔴 DISABLED"}**.`,
-      settings.alertsEnabled ? 0x00ff88 : 0xff4444
-    );
+    const embed = new EmbedBuilder()
+      .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
+      .setAuthor({
+        name: "🎛️ VC Alert Control Panel",
+        iconURL: client.user.displayAvatarURL()
+      })
+      .setDescription(
+        `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
+        `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
+        `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
+        `Use the buttons below to customize your settings on the fly! ⚙️`
+      )
+      .setFooter({ text: `Server ID: ${guildId}`, iconURL: client.user.displayAvatarURL() })
+      .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("toggle_autodelete")
-        .setLabel(settings.autoDelete ? "🔁 Turn OFF Auto-Delete" : "🧹 Turn ON Auto-Delete")
-        .setStyle(settings.autoDelete ? ButtonStyle.Danger : ButtonStyle.Success),
+        .setEmoji("🧹")
+        .setLabel(settings.autoDelete ? "Auto-Delete: ON" : "Auto-Delete: OFF")
+        .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
       new ButtonBuilder()
         .setCustomId("toggle_leavealerts")
-        .setLabel(settings.leaveAlerts ? "🙈 Turn OFF Leave Alerts" : "🚪 Turn ON Leave Alerts")
-        .setStyle(settings.leaveAlerts ? ButtonStyle.Secondary : ButtonStyle.Primary)
+        .setEmoji("🚪")
+        .setLabel(settings.leaveAlerts ? "Leave Alerts: ON" : "Leave Alerts: OFF")
+        .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
     );
 
     await interaction.update({
