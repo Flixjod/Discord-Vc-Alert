@@ -19,18 +19,20 @@ app.get("/", (_, res) => res.status(200).json({ status: "✅ Bot is alive and vi
 app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
 // MongoDB connection
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log("✅ Connected to MongoDB")).catch(console.error);
-
-const guildSchema = new mongoose.Schema({
+const guildSettingsSchema = new mongoose.Schema({
   guildId: { type: String, required: true, unique: true },
-  enabled: { type: Boolean, default: false },
-  channelId: { type: String, default: null }
+  alertsEnabled: { type: Boolean, default: false },
+  textChannelId: { type: String, default: null }
 });
+const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
 
-const GuildSettings = mongoose.model("GuildSettings", guildSchema);
+// Connect to MongoDB
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ Connected to MongoDB"))
+  .catch(err => {
+    console.error("❌ MongoDB connection error:", err.message);
+    process.exit(1);
+  });
 
 
 // Create client
