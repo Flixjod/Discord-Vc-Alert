@@ -24,9 +24,6 @@ mongoose.connect(process.env.MONGO_URI, {
   useUnifiedTopology: true
 }).then(() => console.log("✅ Connected to MongoDB")).catch(console.error);
 
-// MongoDB Schema
-const mongoose = require("mongoose");
-
 const guildSchema = new mongoose.Schema({
   guildId: { type: String, required: true, unique: true },
   enabled: { type: Boolean, default: false },
