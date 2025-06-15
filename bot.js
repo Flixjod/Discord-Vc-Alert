@@ -159,7 +159,7 @@ client.on("interactionCreate", async (interaction) => {
 
     case "vcoff": {
       const settings = await GuildSettings.findOne({ guildId });
-      if (!settings || !settings.enabled) {
+      if (!settings || !settings.alertsEnabled) {
         return interaction.reply({
           embeds: [
             buildEmbedReply(
