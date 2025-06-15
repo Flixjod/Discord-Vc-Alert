@@ -25,11 +25,13 @@ mongoose.connect(process.env.MONGO_URI, {
 }).then(() => console.log("✅ Connected to MongoDB")).catch(console.error);
 
 // MongoDB Schema
+const mongoose = require("mongoose");
+
 const guildSchema = new mongoose.Schema({
   guildId: { type: String, required: true, unique: true },
   enabled: { type: Boolean, default: false },
-  channelId: { type: String }
-}, { collection: "vc_alert_settings" });
+  channelId: { type: String, default: null }
+});
 
 const GuildSettings = mongoose.model("GuildSettings", guildSchema);
 
