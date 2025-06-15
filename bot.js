@@ -115,14 +115,17 @@ client.on("interactionCreate", async (interaction) => {
 
     case "vcon": {
       const mentionedChannel = options.getChannel("channel");
-      const targetChannelId = mentionedChannel?.id || channelId;
-
       let settings = await GuildSettings.findOne({ guildId });
+
       if (!settings) {
         settings = new GuildSettings({ guildId });
       }
 
-      if (settings.enabled && settings.channelId === targetChannelId) {
+      // Use provided channel, or fallback to saved one, or use current channel
+      const targetChannelId = mentionedChannel?.id || settings.textChannelId || channelId;
+
+      // Already enabled and same channel
+      if (settings.alertsEnabled && settings.textChannelId === targetChannelId) {
         return interaction.reply({
           embeds: [
             buildEmbedReply(
@@ -135,8 +138,9 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      settings.enabled = true;
-      settings.channelId = targetChannelId;
+      // Update settings
+      settings.alertsEnabled = true;
+      settings.textChannelId = targetChannelId;
       await settings.save();
 
       await interaction.reply({
@@ -151,6 +155,7 @@ client.on("interactionCreate", async (interaction) => {
       });
       break;
     }
+
 
     case "vcoff": {
       const settings = await GuildSettings.findOne({ guildId });
@@ -167,7 +172,7 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      settings.enabled = false;
+      settings.alertsEnabled = false;
       await settings.save();
 
       await interaction.reply({
