@@ -34,7 +34,6 @@ mongoose.connect(process.env.MONGO_URI)
     process.exit(1);
   });
 
-
 // Create client
 const client = new Client({
   intents: [
@@ -99,7 +98,8 @@ client.on("interactionCreate", async (interaction) => {
   switch (commandName) {
     case "vcstatus": {
       const settings = await GuildSettings.findOne({ guildId }) || {};
-      const enabled = settings.enabled ?? false;
+      const enabled = settings.alertsEnabled ?? false;
+
       await interaction.reply({
         embeds: [
           buildEmbedReply(
@@ -121,10 +121,8 @@ client.on("interactionCreate", async (interaction) => {
         settings = new GuildSettings({ guildId });
       }
 
-      // Use provided channel, or fallback to saved one, or use current channel
       const targetChannelId = mentionedChannel?.id || settings.textChannelId || channelId;
 
-      // Already enabled and same channel
       if (settings.alertsEnabled && settings.textChannelId === targetChannelId) {
         return interaction.reply({
           embeds: [
@@ -138,7 +136,6 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // Update settings
       settings.alertsEnabled = true;
       settings.textChannelId = targetChannelId;
       await settings.save();
@@ -155,7 +152,6 @@ client.on("interactionCreate", async (interaction) => {
       });
       break;
     }
-
 
     case "vcoff": {
       const settings = await GuildSettings.findOne({ guildId });
@@ -200,7 +196,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   if (!guildId) return;
 
   const settings = await GuildSettings.findOne({ guildId });
-  if (!settings?.enabled || !settings.channelId) return;
+  if (!settings?.alertsEnabled || !settings.textChannelId) return;
 
   const user = newState.member?.user || oldState.member?.user;
   if (!user || user.bot) return;
@@ -210,8 +206,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
   let textChannel;
   try {
-    textChannel = await client.channels.fetch(settings.channelId);
+    textChannel = await client.channels.fetch(settings.textChannelId);
   } catch {
+    console.warn(`⚠️ Text channel ${settings.textChannelId} not found. Disabling VC alerts for guild ${guildId}.`);
+    settings.alertsEnabled = false;
+    await settings.save();
     return;
   }
   if (!textChannel?.send) return;
