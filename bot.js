@@ -29,8 +29,10 @@ const guildSchema = new mongoose.Schema({
   guildId: { type: String, required: true, unique: true },
   enabled: { type: Boolean, default: false },
   channelId: { type: String }
-});
+}, { collection: "vc_alert_settings" });
+
 const GuildSettings = mongoose.model("GuildSettings", guildSchema);
+
 
 // Create client
 const client = new Client({
