@@ -233,7 +233,10 @@ client.on("interactionCreate", async (interaction) => {
         `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
         `Use the buttons below to customize your settings on the fly! ⚙️`
       )
-      .setFooter({ text: `Server ID: ${guildId}`, iconURL: client.user.displayAvatarURL() })
+      .setFooter({
+        text: interaction.guild?.icon ? interaction.guild.name : `Server ID: ${interaction.guildId}`,
+        iconURL: interaction.guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
+      })
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
