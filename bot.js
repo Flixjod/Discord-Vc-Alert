@@ -110,13 +110,14 @@ client.on("interactionCreate", async (interaction) => {
             iconURL: client.user.displayAvatarURL()
           })
           .setDescription(
+            `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
             `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
             `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
             `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
             `Use the buttons below to customize your settings on the fly! ⚙️`
           )
           .setFooter({
-            text: interaction.guild?.icon ? interaction.guild.name : `Server ID: ${interaction.guildId}`,
+            text: interaction.guild?.name || `Server ID: ${interaction.guildId}`,
             iconURL: interaction.guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
           })
           .setTimestamp();
@@ -146,6 +147,20 @@ client.on("interactionCreate", async (interaction) => {
       case "vcon": {
         const mentionedChannel = options.getChannel("channel");
         const targetChannelId = mentionedChannel?.id || settings.textChannelId || channelId;
+
+        const targetChannel = interaction.guild.channels.cache.get(targetChannelId);
+        if (!targetChannel || !targetChannel.permissionsFor(client.user)?.has("SendMessages")) {
+          return interaction.reply({
+            embeds: [
+              buildEmbedReply(
+                "🚫 Permission Error",
+                "I can't send messages in the selected channel. Please pick one I have access to.",
+                0xff4444
+              )
+            ],
+            ephemeral: true
+          });
+        }
 
         if (settings.alertsEnabled && settings.textChannelId === targetChannelId) {
           return interaction.reply({
@@ -228,13 +243,14 @@ client.on("interactionCreate", async (interaction) => {
         iconURL: client.user.displayAvatarURL()
       })
       .setDescription(
+        `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
         `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
         `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
         `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
         `Use the buttons below to customize your settings on the fly! ⚙️`
       )
       .setFooter({
-        text: interaction.guild?.icon ? interaction.guild.name : `Server ID: ${interaction.guildId}`,
+        text: interaction.guild?.name || `Server ID: ${interaction.guildId}`,
         iconURL: interaction.guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
       })
       .setTimestamp();
@@ -295,7 +311,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       const msg = await channel.send({ embeds: [embed] });
       if (settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
     } catch (err) {
-      console.error("❌ VC message error:", err);
+      console.error(`❌ VC message error in guild ${guildId}, channel ${settings.textChannelId}, user ${user.id}:`, err);
     }
   }
 });
