@@ -25,12 +25,12 @@ app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 // MongoDB schema
 const guildSettingsSchema = new mongoose.Schema({
   guildId: { type: String, required: true, unique: true },
-  alertsEnabled: { type: Boolean, default: true },
+  alertsEnabled: { type: Boolean, default: false },
   textChannelId: { type: String, default: null },
-  autoDelete: { type: Boolean, default: true },
-  leaveAlerts: { type: Boolean, default: true },
   joinAlerts: { type: Boolean, default: true },
+  leaveAlerts: { type: Boolean, default: true },
   onlineAlerts: { type: Boolean, default: true },
+  autoDelete: { type: Boolean, default: true }
 });
 const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
 
