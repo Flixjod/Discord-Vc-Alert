@@ -84,7 +84,7 @@ client.once("ready", async () => {
   }
 });
 
-const buildControlPanel = (settings, guild) => {
+const buildControlPanel = (settings) => {
   const embed = new EmbedBuilder()
     .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
     .setAuthor({
