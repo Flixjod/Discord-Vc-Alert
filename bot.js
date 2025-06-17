@@ -10,7 +10,8 @@ const {
   ChannelType,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  Events
 } = require("discord.js");
 const mongoose = require("mongoose");
 require("dotenv").config();
@@ -24,10 +25,12 @@ app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 // MongoDB schema
 const guildSettingsSchema = new mongoose.Schema({
   guildId: { type: String, required: true, unique: true },
-  alertsEnabled: { type: Boolean, default: false },
+  alertsEnabled: { type: Boolean, default: true },
   textChannelId: { type: String, default: null },
   autoDelete: { type: Boolean, default: true },
-  leaveAlerts: { type: Boolean, default: true }
+  leaveAlerts: { type: Boolean, default: true },
+  joinAlerts: { type: Boolean, default: true },
+  onlineAlerts: { type: Boolean, default: true },
 });
 const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
 
@@ -45,7 +48,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences
   ],
   partials: [Partials.User, Partials.GuildMember]
 });
@@ -54,7 +58,7 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName("vcstatus")
-    .setDescription("📡 Check if voice notifications are ON or OFF."),
+    .setDescription("📡 View and control VC/online alerts."),
   new SlashCommandBuilder()
     .setName("vcon")
     .setDescription("🚀 Enable voice join/leave alerts.")
@@ -66,7 +70,7 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName("vcoff")
-    .setDescription("🛑 Disable voice join/leave alerts.")
+    .setDescription("🛑 Disable all alerts.")
 ].map(cmd => cmd.toJSON());
 
 client.once("ready", async () => {
@@ -80,240 +84,163 @@ client.once("ready", async () => {
   }
 });
 
-const buildEmbedReply = (title, description, color) => {
-  return new EmbedBuilder()
-    .setColor(color)
-    .setTitle(title)
-    .setDescription(description)
-    .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+const buildControlPanel = (settings, guild) => {
+  const embed = new EmbedBuilder()
+    .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
+    .setAuthor({ name: "🎛️ VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+    .setDescription(
+      `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}
+` +
+      `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}
+` +
+      `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}
+` +
+      `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}
+` +
+      `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}
+` +
+      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}
+
+` +
+      `Use the buttons below to customize your settings on the fly! ⚙️`
+    )
+    .setFooter({ text: guild?.name || `Server ID: ${guild?.id}`, iconURL: guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL() })
     .setTimestamp();
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("toggle_autodelete").setEmoji("🧹").setLabel(`Auto-Delete: ${settings.autoDelete ? "ON" : "OFF"}`).setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggle_joinalerts").setEmoji("👋").setLabel(`Join Alerts: ${settings.joinAlerts ? "ON" : "OFF"}`).setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggle_leavealerts").setEmoji("🚪").setLabel(`Leave Alerts: ${settings.leaveAlerts ? "ON" : "OFF"}`).setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("toggle_onlinealerts").setEmoji("🟢").setLabel(`Online Alerts: ${settings.onlineAlerts ? "ON" : "OFF"}`).setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("confirm_reset").setEmoji("♻️").setLabel("Reset Settings").setStyle(ButtonStyle.Danger)
+  );
+
+  return { embed, rows: [row1, row2] };
 };
 
-// Interaction handler
-client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    const { commandName, guildId, channelId, options } = interaction;
-    if (!guildId) return;
+client.on(Events.InteractionCreate, async interaction => {
+  if (!interaction.inGuild()) return;
+  const { guildId, guild } = interaction;
+  let settings = await GuildSettings.findOne({ guildId }) || new GuildSettings({ guildId });
+  await settings.save();
 
-    let settings = await GuildSettings.findOne({ guildId });
-    if (!settings) {
-      settings = new GuildSettings({ guildId });
-      await settings.save();
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === "vcstatus") {
+      const { embed, rows } = buildControlPanel(settings, guild);
+      return interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
     }
 
-    switch (commandName) {
-      case "vcstatus": {
-        const embed = new EmbedBuilder()
-          .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
-          .setAuthor({
-            name: "🎛️ VC Alert Control Panel",
-            iconURL: client.user.displayAvatarURL()
-          })
-          .setDescription(
-            `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
-            `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
-            `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
-            `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
-            `Use the buttons below to customize your settings on the fly! ⚙️`
-          )
-          .setFooter({
-            text: interaction.guild?.name || `Server ID: ${interaction.guildId}`,
-            iconURL: interaction.guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
-          })
-          .setTimestamp();
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("toggle_autodelete")
-            .setEmoji("🧹")
-            .setLabel(settings.autoDelete ? "Auto-Delete: ON" : "Auto-Delete: OFF")
-            .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-
-          new ButtonBuilder()
-            .setCustomId("toggle_leavealerts")
-            .setEmoji("🚪")
-            .setLabel(settings.leaveAlerts ? "Leave Alerts: ON" : "Leave Alerts: OFF")
-            .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
-        );
-
-        await interaction.reply({
-          embeds: [embed],
-          components: settings.alertsEnabled ? [row] : [],
-          ephemeral: true
-        });
-        break;
+    if (interaction.commandName === "vcon") {
+      const channel = interaction.options.getChannel("channel") || interaction.channel;
+      if (!channel.permissionsFor(client.user)?.has("SendMessages")) {
+        return interaction.reply({ content: "❌ I can't send messages in that channel.", ephemeral: true });
       }
+      settings.alertsEnabled = true;
+      settings.textChannelId = channel.id;
+      await settings.save();
+      return interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setColor(0x00ff88)
+          .setTitle("✅ VC Alerts Enabled")
+          .setDescription(`Voice activity will be announced in <#${channel.id}>.`)
+          .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+          .setTimestamp()],
+        ephemeral: true
+      });
+    }
 
-      case "vcon": {
-        const mentionedChannel = options.getChannel("channel");
-        const targetChannelId = mentionedChannel?.id || settings.textChannelId || channelId;
-
-        const targetChannel = interaction.guild.channels.cache.get(targetChannelId);
-        if (!targetChannel || !targetChannel.permissionsFor(client.user)?.has("SendMessages")) {
-          return interaction.reply({
-            embeds: [
-              buildEmbedReply(
-                "🚫 Permission Error",
-                "I can't send messages in the selected channel. Please pick one I have access to.",
-                0xff4444
-              )
-            ],
-            ephemeral: true
-          });
-        }
-
-        if (settings.alertsEnabled && settings.textChannelId === targetChannelId) {
-          return interaction.reply({
-            embeds: [
-              buildEmbedReply(
-                "⚠️ Already Enabled",
-                `Voice alerts are already active in <#${targetChannelId}>! 🎧`,
-                0xffcc00
-              )
-            ],
-            ephemeral: true
-          });
-        }
-
-        settings.alertsEnabled = true;
-        settings.textChannelId = targetChannelId;
-        await settings.save();
-
-        await interaction.reply({
-          embeds: [
-            buildEmbedReply(
-              "✅ VC Join/Leave Alerts ENABLED",
-              `Users joining or leaving voice channels will now be announced in <#${targetChannelId}>. 🎉`,
-              0x00ff88
-            )
-          ],
-          ephemeral: true
-        });
-        break;
+    if (interaction.commandName === "vcoff") {
+      if (!settings.alertsEnabled) {
+        return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xffcc00).setTitle("⚠️ Already Disabled").setDescription("VC alerts are already off.")], ephemeral: true });
       }
-
-      case "vcoff": {
-        if (!settings.alertsEnabled) {
-          return interaction.reply({
-            embeds: [
-              buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", 0xffcc00)
-            ],
-            ephemeral: true
-          });
-        }
-
-        settings.alertsEnabled = false;
-        await settings.save();
-
-        await interaction.reply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0xff4444)
-              .setAuthor({
-                name: "VC Alerts Powered Down 🔕",
-                iconURL: client.user.displayAvatarURL()
-              })
-              .setDescription("🚫 Voice alerts have been turned off!\n\nNo more **join** or **leave** messages — pure peace and quiet. 🌙\n\nUse `/vcon` to fire them back up anytime!")
-              .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
-              .setTimestamp()
-          ],
-          ephemeral: true
-        });
-        break;
-      }
+      settings.alertsEnabled = false;
+      await settings.save();
+      return interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setColor(0xff4444)
+          .setTitle("🔕 VC Alerts Disabled")
+          .setDescription("All VC alerts turned off.
+Use `/vcon` to enable.")
+          .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+          .setTimestamp()],
+        ephemeral: true
+      });
     }
   }
 
   if (interaction.isButton()) {
-    const { guildId, customId } = interaction;
-    const settings = await GuildSettings.findOne({ guildId });
-    if (!settings) return;
-
-    if (customId === "toggle_autodelete") {
-      settings.autoDelete = !settings.autoDelete;
-    } else if (customId === "toggle_leavealerts") {
-      settings.leaveAlerts = !settings.leaveAlerts;
+    switch (interaction.customId) {
+      case "toggle_autodelete": settings.autoDelete = !settings.autoDelete; break;
+      case "toggle_leavealerts": settings.leaveAlerts = !settings.leaveAlerts; break;
+      case "toggle_joinalerts": settings.joinAlerts = !settings.joinAlerts; break;
+      case "toggle_onlinealerts": settings.onlineAlerts = !settings.onlineAlerts; break;
+      case "confirm_reset":
+        settings = new GuildSettings({ guildId });
+        await settings.save();
+        break;
     }
     await settings.save();
-
-    const embed = new EmbedBuilder()
-      .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
-      .setAuthor({
-        name: "🎛️ VC Alert Control Panel",
-        iconURL: client.user.displayAvatarURL()
-      })
-      .setDescription(
-        `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
-        `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
-        `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
-        `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
-        `Use the buttons below to customize your settings on the fly! ⚙️`
-      )
-      .setFooter({
-        text: interaction.guild?.name || `Server ID: ${interaction.guildId}`,
-        iconURL: interaction.guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
-      })
-      .setTimestamp();
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("toggle_autodelete")
-        .setEmoji("🧹")
-        .setLabel(settings.autoDelete ? "Auto-Delete: ON" : "Auto-Delete: OFF")
-        .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId("toggle_leavealerts")
-        .setEmoji("🚪")
-        .setLabel(settings.leaveAlerts ? "Leave Alerts: ON" : "Leave Alerts: OFF")
-        .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
-    );
-
-    await interaction.update({
-      embeds: [embed],
-      components: [row]
-    });
+    const { embed, rows } = buildControlPanel(settings, interaction.guild);
+    return interaction.update({ embeds: [embed], components: rows });
   }
 });
 
-// Voice event
+// Voice state update (join/leave)
 client.on("voiceStateUpdate", async (oldState, newState) => {
-  const guildId = newState.guild?.id || oldState.guild?.id;
+  const guildId = newState.guild.id;
   const user = newState.member?.user || oldState.member?.user;
   if (!guildId || !user || user.bot) return;
-
   const settings = await GuildSettings.findOne({ guildId });
   if (!settings?.alertsEnabled || !settings.textChannelId) return;
 
-  if (new Set(["684773505157431347", "1190991820637868042"]).has(user.id)) return;
-
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
-  if (!channel || !channel.send) return;
+  if (!channel?.send) return;
 
-  let embed;
-  if (!oldState.channel && newState.channel) {
+  let embed = null;
+  if (!oldState.channel && newState.channel && settings.joinAlerts) {
     embed = new EmbedBuilder()
       .setColor(0x00ffcc)
       .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: user.displayAvatarURL({ dynamic: true }) })
-      .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
+      .setDescription(`🎧 Joined **${newState.channel.name}** — Let the vibes begin!`)
       .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
       .setAuthor({ name: `${user.username} dipped out! 🚪`, iconURL: user.displayAvatarURL({ dynamic: true }) })
-      .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
+      .setDescription(`👋 Left **${oldState.channel.name}** — See ya next time!`)
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   }
 
   if (embed) {
-    try {
-      const msg = await channel.send({ embeds: [embed] });
-      if (settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
-    } catch (err) {
-      console.error(`❌ VC message error in guild ${guildId}, channel ${settings.textChannelId}, user ${user.id}:`, err);
-    }
+    const msg = await channel.send({ embeds: [embed] }).catch(() => null);
+    if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
   }
+});
+
+// Online alert
+client.on("presenceUpdate", async (oldPresence, newPresence) => {
+  const member = newPresence.member;
+  if (!member || member.user.bot || newPresence.status !== "online") return;
+  const settings = await GuildSettings.findOne({ guildId: member.guild.id });
+  if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
+
+  const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
+  if (!channel?.send) return;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x55ff55)
+    .setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
+    .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
+    .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
+    .setTimestamp();
+
+  const msg = await channel.send({ embeds: [embed] }).catch(() => null);
+  if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
 });
 
 client.login(process.env.TOKEN).catch(err => console.error("❌ Login failed:", err));
