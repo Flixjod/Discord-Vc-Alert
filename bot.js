@@ -101,7 +101,7 @@ const buildControlPanel = (settings, guild) => {
       `Use the buttons below to customize your settings on the fly! ⚙️`
     )
     .setFooter({
-      text: guild?.name || `Server ID: ${guild?.id}`,
+      text: "`VC Alerts Settings`",
       iconURL: guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
     })
     .setTimestamp();
@@ -145,13 +145,24 @@ const buildControlPanel = (settings, guild) => {
   return { embed, rows: [row1, row2] };
 };
 
+function buildEmbedReply(title, description, color) {
+  return new EmbedBuilder()
+    .setColor(color || 0x5865f2)
+    .setAuthor({ name: title, iconURL: client.user?.displayAvatarURL() || "" })
+    .setDescription(description)
+    .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user?.displayAvatarURL() || "" })
+    .setTimestamp();
+}
 
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.inGuild()) return;
 
-  const { guildId, guild } = interaction;
-  let settings = await GuildSettings.findOne({ guildId }) || new GuildSettings({ guildId });
-  await settings.save();
+  const guildId = interaction.guildId;
+  let settings = await GuildSettings.findOne({ guildId });
+  if (!settings) {
+    settings = new GuildSettings({ guildId });
+    await settings.save();
+  }
 
   // Slash commands
   if (interaction.isChatInputCommand()) {
@@ -159,7 +170,6 @@ client.on(Events.InteractionCreate, async interaction => {
       const { embed, rows } = buildControlPanel(settings, guild);
       return interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
     }
-
     if (interaction.commandName === "vcon") {
       const channel = interaction.options.getChannel("channel") || interaction.channel;
       const targetChannelId = channel.id;
@@ -169,9 +179,9 @@ client.on(Events.InteractionCreate, async interaction => {
         return interaction.reply({
           embeds: [
             buildEmbedReply(
-              "🚫 Permission Error",
-              "I can't send messages in the selected channel. Please pick one I have access to.",
-              0xff4444
+            "🚫 Permission Error",
+            "I can't send messages in the selected channel. Please pick one I have access to.",
+            0xff4444
             )
           ],
           ephemeral: true
@@ -237,7 +247,7 @@ client.on(Events.InteractionCreate, async interaction => {
         ephemeral: true
       });
     }
-  }
+
 
   // Buttons
   if (interaction.isButton()) {
@@ -255,7 +265,12 @@ client.on(Events.InteractionCreate, async interaction => {
         settings.onlineAlerts = !settings.onlineAlerts;
         break;
       case "confirm_reset":
-        settings = new GuildSettings({ guildId });
+        settings.alertsEnabled = true;
+        settings.textChannelId = null;
+        settings.autoDelete = true;
+        settings.leaveAlerts = true;
+        settings.joinAlerts = true;
+        settings.onlineAlerts = true;
         await settings.save();
         break;
     }
