@@ -181,7 +181,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (settings.alertsEnabled && settings.textChannelId === targetChannelId) {
         return interaction.reply({
-          embeds: [buildEmbedReply("⚠️ Already Enabled", `Alerts are already active in <#${targetChannelId}>!`, 0xffcc00)],
+          embeds: [buildEmbedReply(
+            "⚠️ Already Enabled",
+            `Alerts are already active in <#${targetChannelId}>! 🎯\n\nUse \`/vcstatus\` to tweak alert options or reset settings.`,
+            0xffcc00
+          )],
           ephemeral: true
         });
       }
@@ -191,7 +195,11 @@ client.on(Events.InteractionCreate, async interaction => {
       await settings.save();
 
       return interaction.reply({
-        embeds: [buildEmbedReply("✅ Alerts ENABLED", `VC alerts will be sent to <#${targetChannelId}> 🎉`, 0x00ff88)],
+        embeds: [buildEmbedReply(
+          "✅ Alerts Enabled",
+          `VC alerts will now go to <#${channel.id}> 🎉\n\nUse \`/vcstatus\` to customize alert types and auto-delete!`,
+          0x00ff88
+        )],
         ephemeral: true
       });
     }
