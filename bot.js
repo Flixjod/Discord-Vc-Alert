@@ -282,14 +282,14 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     embed = new EmbedBuilder()
       .setColor(0x00ffcc)
       .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: user.displayAvatarURL({ dynamic: true }) })
-      .setDescription(`🎧 Joined **${newState.channel.name}** — Let the vibes begin!`)
+      .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
       .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
       .setAuthor({ name: `${user.username} dipped out! 🚪`, iconURL: user.displayAvatarURL({ dynamic: true }) })
-      .setDescription(`👋 Left **${oldState.channel.name}** — See ya next time!`)
+      .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   }
