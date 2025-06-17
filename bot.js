@@ -87,35 +87,59 @@ client.once("ready", async () => {
 const buildControlPanel = (settings, guild) => {
   const embed = new EmbedBuilder()
     .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
-    .setAuthor({ name: "🎛️ VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+    .setAuthor({
+      name: "🎛️ VC Alert Control Panel",
+      iconURL: client.user.displayAvatarURL()
+    })
     .setDescription(
-      `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}
-` +
-      `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}
-` +
-      `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}
-` +
-      `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}
-` +
-      `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}
-` +
-      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}
-
-` +
+      `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
+      `> 🔔 **Voice Alerts:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
+      `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
+      `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
+      `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
+      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
       `Use the buttons below to customize your settings on the fly! ⚙️`
     )
-    .setFooter({ text: guild?.name || `Server ID: ${guild?.id}`, iconURL: guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL() })
+    .setFooter({
+      text: guild?.name || `Server ID: ${guild?.id}`,
+      iconURL: guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
+    })
     .setTimestamp();
 
+  // Row 1: Join / Leave / Online
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("toggle_autodelete").setEmoji("🧹").setLabel(`Auto-Delete: ${settings.autoDelete ? "ON" : "OFF"}`).setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("toggle_joinalerts").setEmoji("👋").setLabel(`Join Alerts: ${settings.joinAlerts ? "ON" : "OFF"}`).setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("toggle_leavealerts").setEmoji("🚪").setLabel(`Leave Alerts: ${settings.leaveAlerts ? "ON" : "OFF"}`).setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    new ButtonBuilder()
+      .setCustomId("toggle_joinalerts")
+      .setEmoji("👋")
+      .setLabel(`Join Alerts: ${settings.joinAlerts ? "ON" : "OFF"}`)
+      .setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId("toggle_leavealerts")
+      .setEmoji("🚪")
+      .setLabel(`Leave Alerts: ${settings.leaveAlerts ? "ON" : "OFF"}`)
+      .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId("toggle_onlinealerts")
+      .setEmoji("🟢")
+      .setLabel(`Online Alerts: ${settings.onlineAlerts ? "ON" : "OFF"}`)
+      .setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
   );
 
+  // Row 2: Auto-Delete / Reset
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("toggle_onlinealerts").setEmoji("🟢").setLabel(`Online Alerts: ${settings.onlineAlerts ? "ON" : "OFF"}`).setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("confirm_reset").setEmoji("♻️").setLabel("Reset Settings").setStyle(ButtonStyle.Danger)
+    new ButtonBuilder()
+      .setCustomId("toggle_autodelete")
+      .setEmoji("🧹")
+      .setLabel(`Auto-Delete: ${settings.autoDelete ? "ON" : "OFF"}`)
+      .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId("confirm_reset")
+      .setEmoji("♻️")
+      .setLabel("Reset Settings")
+      .setStyle(ButtonStyle.Danger)
   );
 
   return { embed, rows: [row1, row2] };
