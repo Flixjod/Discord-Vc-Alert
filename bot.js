@@ -131,7 +131,7 @@ const buildControlPanel = (settings, guild) => {
       .setLabel(`Auto-Delete: ${settings.autoDelete ? "ON" : "OFF"}`)
       .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId("confirm_reset")
+      .setCustomId("open_reset_confirm")
       .setEmoji("♻️")
       .setLabel("Reset Settings")
       .setStyle(ButtonStyle.Danger)
@@ -221,6 +221,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 
+  // Button interactions
   if (interaction.isButton()) {
     switch (interaction.customId) {
       case "toggle_autodelete":
@@ -235,20 +236,39 @@ client.on(Events.InteractionCreate, async interaction => {
       case "toggle_onlinealerts":
         settings.onlineAlerts = !settings.onlineAlerts;
         break;
-      case "confirm_reset":
-        Object.assign(settings, {
-          alertsEnabled: true,
-          textChannelId: null,
-          autoDelete: true,
-          leaveAlerts: true,
-          joinAlerts: true,
-          onlineAlerts: true
+
+      case "open_reset_confirm":
+        const confirmRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("confirm_reset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId("cancel_reset").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
+        );
+
+        return interaction.update({
+          embeds: [buildEmbedReply("⚠️ Confirm Settings Reset", "Are you sure you want to reset all VC alert settings to default?", 0xffcc00)],
+          components: [confirmRow]
         });
-        break;
+
+      case "confirm_reset":
+        settings.alertsEnabled = true;
+        settings.textChannelId = null;
+        settings.autoDelete = true;
+        settings.leaveAlerts = true;
+        settings.joinAlerts = true;
+        settings.onlineAlerts = true;
+        await settings.save();
+
+        const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff);
+        const resetPanel = buildControlPanel(settings, interaction.guild);
+        return interaction.update({ embeds: [resetEmbed, resetPanel.embed], components: resetPanel.rows });
+
+      case "cancel_reset":
+        const cancelPanel = buildControlPanel(settings, interaction.guild);
+        return interaction.update({ embeds: [cancelPanel.embed], components: cancelPanel.rows });
     }
+
     await settings.save();
-    const { embed, rows } = buildControlPanel(settings, interaction.guild);
-    return interaction.update({ embeds: [embed], components: rows });
+    const updated = buildControlPanel(settings, interaction.guild);
+    return interaction.update({ embeds: [updated.embed], components: updated.rows });
   }
 });
 
