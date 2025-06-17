@@ -121,12 +121,15 @@ const buildControlPanel = (settings, guild) => {
   return { embed, rows: [row1, row2] };
 };
 
+
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.inGuild()) return;
+
   const { guildId, guild } = interaction;
   let settings = await GuildSettings.findOne({ guildId }) || new GuildSettings({ guildId });
   await settings.save();
 
+  // Slash commands
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "vcstatus") {
       const { embed, rows } = buildControlPanel(settings, guild);
@@ -135,48 +138,98 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === "vcon") {
       const channel = interaction.options.getChannel("channel") || interaction.channel;
-      if (!channel.permissionsFor(client.user)?.has("SendMessages")) {
-        return interaction.reply({ content: "❌ I can't send messages in that channel.", ephemeral: true });
+      const targetChannelId = channel.id;
+
+      const permissions = channel.permissionsFor(client.user);
+      if (!permissions?.has("ViewChannel") || !permissions.has("SendMessages")) {
+        return interaction.reply({
+          embeds: [
+            buildEmbedReply(
+              "🚫 Permission Error",
+              "I can't send messages in the selected channel. Please pick one I have access to.",
+              0xff4444
+            )
+          ],
+          ephemeral: true
+        });
       }
+
+      if (settings.alertsEnabled && settings.textChannelId === targetChannelId) {
+        return interaction.reply({
+          embeds: [
+            buildEmbedReply(
+              "⚠️ Already Enabled",
+              `Voice alerts are already active in <#${targetChannelId}>! 🎧`,
+              0xffcc00
+            )
+          ],
+          ephemeral: true
+        });
+      }
+
       settings.alertsEnabled = true;
-      settings.textChannelId = channel.id;
+      settings.textChannelId = targetChannelId;
       await settings.save();
+
       return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0x00ff88)
-          .setTitle("✅ VC Alerts Enabled")
-          .setDescription(`Voice activity will be announced in <#${channel.id}>.`)
-          .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
-          .setTimestamp()],
+        embeds: [
+          buildEmbedReply(
+            "✅ VC Join/Leave Alerts ENABLED",
+            `Users joining or leaving voice channels will now be announced in <#${targetChannelId}>. 🎉`,
+            0x00ff88
+          )
+        ],
         ephemeral: true
       });
     }
 
     if (interaction.commandName === "vcoff") {
       if (!settings.alertsEnabled) {
-        return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xffcc00).setTitle("⚠️ Already Disabled").setDescription("VC alerts are already off.")], ephemeral: true });
+        return interaction.reply({
+          embeds: [
+            buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", 0xffcc00)
+          ],
+          ephemeral: true
+        });
       }
+
       settings.alertsEnabled = false;
       await settings.save();
+
       return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0xff4444)
-          .setTitle("🔕 VC Alerts Disabled")
-          .setDescription("All VC alerts turned off.
-Use `/vcon` to enable.")
-          .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
-          .setTimestamp()],
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xff4444)
+            .setAuthor({
+              name: "VC Alerts Powered Down 🔕",
+              iconURL: client.user.displayAvatarURL()
+            })
+            .setDescription(
+              "🚫 Voice alerts have been turned off!\n\nNo more **join** or **leave** messages — pure peace and quiet. 🌙\n\nUse `/vcon` to fire them back up anytime!"
+            )
+            .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+            .setTimestamp()
+        ],
         ephemeral: true
       });
     }
   }
 
+  // Buttons
   if (interaction.isButton()) {
     switch (interaction.customId) {
-      case "toggle_autodelete": settings.autoDelete = !settings.autoDelete; break;
-      case "toggle_leavealerts": settings.leaveAlerts = !settings.leaveAlerts; break;
-      case "toggle_joinalerts": settings.joinAlerts = !settings.joinAlerts; break;
-      case "toggle_onlinealerts": settings.onlineAlerts = !settings.onlineAlerts; break;
+      case "toggle_autodelete":
+        settings.autoDelete = !settings.autoDelete;
+        break;
+      case "toggle_leavealerts":
+        settings.leaveAlerts = !settings.leaveAlerts;
+        break;
+      case "toggle_joinalerts":
+        settings.joinAlerts = !settings.joinAlerts;
+        break;
+      case "toggle_onlinealerts":
+        settings.onlineAlerts = !settings.onlineAlerts;
+        break;
       case "confirm_reset":
         settings = new GuildSettings({ guildId });
         await settings.save();
@@ -187,6 +240,7 @@ Use `/vcon` to enable.")
     return interaction.update({ embeds: [embed], components: rows });
   }
 });
+
 
 // Voice state update (join/leave)
 client.on("voiceStateUpdate", async (oldState, newState) => {
