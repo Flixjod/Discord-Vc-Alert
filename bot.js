@@ -96,7 +96,7 @@ const buildControlPanel = (settings, guild) => {
     })
     .setDescription(
       `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
-      `> 🔔 **Alerts Status:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n\n` +
+      `> 🔔 **Alerts Status:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
       `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
@@ -135,23 +135,21 @@ const buildControlPanel = (settings, guild) => {
     new ButtonBuilder()
       .setCustomId('resetSettings')
       .setLabel('♻️ Reset Settings')
-      .setStyle(ButtonStyle.Danger),
+      .setStyle(ButtonStyle.Danger)
 
-    new ButtonBuilder()
-      .setCustomId('toggleVcAlerts')
-      .setLabel(`📢 Alerts: ${settings.alertsEnabled ? 'ON' : 'OFF'}`)
-      .setStyle(ButtonStyle.Secondary)
   );
 
   return { embed, rows: [row1, row2] };
 };
 
-function buildEmbedReply(title, description, color) {
+function buildEmbedReply(title, description, color, guild) {
   return new EmbedBuilder()
     .setColor(color || 0x5865f2)
     .setAuthor({ name: title, iconURL: client.user?.displayAvatarURL() || "" })
     .setDescription(description)
-    .setFooter({ text: "VC Alert Control Panel", iconURL: interaction.guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()})
+    .setFooter({
+      text: "VC Alert Control Panel",
+      iconURL: guild.iconURL({ dynamic: true }) || client.user.displayAvatarURL()})
     .setTimestamp();
 }
 
@@ -186,7 +184,8 @@ client.on(Events.InteractionCreate, async interaction => {
           embeds: [buildEmbedReply(
             "❌ Channel Missing",
             `Hmm... I couldn't find a valid text channel to send alerts to.\n\nTry using:</br>• \`/vcon #your-channel\` to specify one\n• Or make sure the saved one still exists.`,
-            0xff4444
+            0xff4444,
+            guild
           )],
           ephemeral: true
         });
@@ -198,7 +197,8 @@ client.on(Events.InteractionCreate, async interaction => {
           embeds: [buildEmbedReply(
             "🚫 No Permission",
             `I can’t post in <#${channel.id}>. Please make sure I have **View Channel** and **Send Messages** permission there.`,
-            0xff4444
+            0xff4444,
+            guild
           )],
           ephemeral: true
         });
@@ -209,7 +209,8 @@ client.on(Events.InteractionCreate, async interaction => {
           embeds: [buildEmbedReply(
             "⚠️ Already On",
             `VC alerts are **already active** in <#${channel.id}> 🔊\n\nUse \`/vcstatus\` to manage join, leave, and online alerts. Or change the channel with \`/vcon #new-channel\`.`,
-            0xffcc00
+            0xffcc00,
+            guild
           )],
           ephemeral: true
         });
@@ -223,7 +224,8 @@ client.on(Events.InteractionCreate, async interaction => {
         embeds: [buildEmbedReply(
           "✅ VC Alerts Enabled",
           `You're all set! I’ll now post voice activity in <#${channel.id}> 🎙️\n\nUse \`/vcstatus\` anytime to tweak the vibe — join, leave, and online alerts are all customizable. ✨`,
-          0x00ff88
+          0x00ff88,
+          guild
         )],
         ephemeral: true
       });
@@ -232,7 +234,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.commandName === "vcoff") {
       if (!settings.alertsEnabled) {
         return interaction.reply({
-          embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", 0xffcc00)],
+          embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", 0xffcc00, guild)],
           ephemeral: true
         });
       }
@@ -257,31 +259,31 @@ client.on(Events.InteractionCreate, async interaction => {
   // Button interactions
   if (interaction.isButton()) {
     switch (interaction.customId) {
-      case "toggle_autodelete":
+      case "toggleAutoDelete":
         settings.autoDelete = !settings.autoDelete;
         break;
-      case "toggle_leavealerts":
+      case "toggleLeaveAlerts":
         settings.leaveAlerts = !settings.leaveAlerts;
         break;
-      case "toggle_joinalerts":
+      case "toggleJoinAlerts":
         settings.joinAlerts = !settings.joinAlerts;
         break;
-      case "toggle_onlinealerts":
+      case "toggleOnlineAlerts":
         settings.onlineAlerts = !settings.onlineAlerts;
         break;
 
-      case "open_reset_confirm":
+      case "resetSettings":
         const confirmRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("confirm_reset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId("cancel_reset").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
+          new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
         );
 
         return interaction.update({
-          embeds: [buildEmbedReply("⚠️ Confirm Settings Reset", "Are you sure you want to reset all VC alert settings to default?", 0xffcc00)],
+          embeds: [buildEmbedReply("⚠️ Confirm Settings Reset", "Are you sure you want to reset all VC alert settings to default?", 0xffcc00, interaction.guild)],
           components: [confirmRow]
         });
 
-      case "confirm_reset":
+      case "confirmReset":
         settings.alertsEnabled = true;
         settings.textChannelId = null;
         settings.autoDelete = true;
@@ -290,11 +292,11 @@ client.on(Events.InteractionCreate, async interaction => {
         settings.onlineAlerts = true;
         await settings.save();
 
-        const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff);
+        const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, interaction.guild);
         const resetPanel = buildControlPanel(settings, interaction.guild);
         return interaction.update({ embeds: [resetEmbed, resetPanel.embed], components: resetPanel.rows });
 
-      case "cancel_reset":
+      case "cancelReset":
         const cancelPanel = buildControlPanel(settings, interaction.guild);
         return interaction.update({ embeds: [cancelPanel.embed], components: cancelPanel.rows });
     }
