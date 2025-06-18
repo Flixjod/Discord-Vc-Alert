@@ -171,22 +171,41 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === "vcon") {
-      const channel = interaction.options.getChannel("channel") || interaction.channel;
-      const targetChannelId = channel.id;
+      const selectedChannel = interaction.options.getChannel("channel");
+      const savedChannel = settings.textChannelId
+        ? await interaction.guild.channels.fetch(settings.textChannelId).catch(() => null)
+        : null;
 
-      const permissions = channel.permissionsFor(client.user);
-      if (!permissions?.has("ViewChannel") || !permissions.has("SendMessages")) {
+      const channel = selectedChannel || savedChannel || interaction.channel;
+
+      if (!channel || channel.type !== ChannelType.GuildText) {
         return interaction.reply({
-          embeds: [buildEmbedReply("🚫 Permission Error", "I can't send messages in that channel.", 0xff4444)],
+          embeds: [buildEmbedReply(
+            "❌ Channel Missing",
+            `Hmm... I couldn't find a valid text channel to send alerts to.\n\nTry using:</br>• \`/vcon #your-channel\` to specify one\n• Or make sure the saved one still exists.`,
+            0xff4444
+          )],
           ephemeral: true
         });
       }
 
-      if (settings.alertsEnabled && settings.textChannelId === targetChannelId) {
+      const permissions = channel.permissionsFor(client.user);
+      if (!permissions?.has("ViewChannel") || !permissions.has("SendMessages")) {
         return interaction.reply({
           embeds: [buildEmbedReply(
-            "⚠️ Already Enabled",
-            `Alerts are already active in <#${targetChannelId}>! 🎯\n\nUse \`/vcstatus\` to tweak alert options or reset settings.`,
+            "🚫 No Permission",
+            `I can’t post in <#${channel.id}>. Please make sure I have **View Channel** and **Send Messages** permission there.`,
+            0xff4444
+          )],
+          ephemeral: true
+        });
+      }
+
+      if (settings.alertsEnabled && settings.textChannelId === channel.id) {
+        return interaction.reply({
+          embeds: [buildEmbedReply(
+            "⚠️ Already On",
+            `VC alerts are **already active** in <#${channel.id}> 🔊\n\nUse \`/vcstatus\` to manage join, leave, and online alerts. Or change the channel with \`/vcon #new-channel\`.`,
             0xffcc00
           )],
           ephemeral: true
@@ -194,13 +213,13 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       settings.alertsEnabled = true;
-      settings.textChannelId = targetChannelId;
+      settings.textChannelId = channel.id;
       await settings.save();
 
       return interaction.reply({
         embeds: [buildEmbedReply(
-          "✅ Alerts Enabled",
-          `VC alerts will now go to <#${channel.id}> 🎉\n\nUse \`/vcstatus\` to customize alert types and auto-delete!`,
+          "✅ VC Alerts Enabled",
+          `You're all set! I’ll now post voice activity in <#${channel.id}> 🎙️\n\nUse \`/vcstatus\` anytime to tweak the vibe — join, leave, and online alerts are all customizable. ✨`,
           0x00ff88
         )],
         ephemeral: true
