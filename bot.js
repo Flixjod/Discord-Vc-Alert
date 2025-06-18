@@ -98,7 +98,7 @@ const buildControlPanel = (settings, guild) => {
       `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
       `> 🔔 **Alerts Status:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
       `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🚪 **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
+      `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
       `Use the buttons below to customize your settings on the fly! ⚙️`
@@ -117,7 +117,7 @@ const buildControlPanel = (settings, guild) => {
 
     new ButtonBuilder()
       .setCustomId('toggleLeaveAlerts')
-      .setLabel(`🚪 Leave: ${settings.leaveAlerts ? 'ON' : 'OFF'}`)
+      .setLabel(`🏃‍♂️ Leave: ${settings.leaveAlerts ? 'ON' : 'OFF'}`)
       .setStyle(ButtonStyle.Primary),
 
     new ButtonBuilder()
@@ -330,7 +330,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
-      .setAuthor({ name: `${user.username} dipped out! 🚪`, iconURL: user.displayAvatarURL({ dynamic: true }) })
+      .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: user.displayAvatarURL({ dynamic: true }) })
       .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
