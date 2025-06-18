@@ -95,7 +95,7 @@ const buildControlPanel = (settings, guild) => {
       iconURL: client.user.displayAvatarURL()
     })
     .setDescription(
-      `> 📢 **Alert Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
+      `> 📢 **Alerts Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
       `> 🔔 **Alerts Status:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
       `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
@@ -112,31 +112,30 @@ const buildControlPanel = (settings, guild) => {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('toggleJoinAlerts')
-      .setLabel(`👋 Join`)
-      .setStyle(ButtonStyle.Primary),
+      .setLabel('👋 Join')
+      .setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
 
     new ButtonBuilder()
       .setCustomId('toggleLeaveAlerts')
-      .setLabel(`🏃‍♂️ Leave`)
-      .setStyle(ButtonStyle.Primary),
+      .setLabel('🏃‍♂️ Leave')
+      .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
 
     new ButtonBuilder()
       .setCustomId('toggleOnlineAlerts')
-      .setLabel(`🟢 Online`)
-      .setStyle(ButtonStyle.Primary)
+      .setLabel('🟢 Online')
+      .setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
   );
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('toggleAutoDelete')
-      .setLabel(`🧹 Auto-Delete`)
-      .setStyle(ButtonStyle.Success),
+      .setLabel('🧹 Auto-Delete')
+      .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
 
     new ButtonBuilder()
       .setCustomId('resetSettings')
       .setLabel('♻️ Reset Settings')
       .setStyle(ButtonStyle.Danger)
-
   );
 
   return { embed, rows: [row1, row2] };
