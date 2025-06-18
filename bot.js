@@ -112,24 +112,24 @@ const buildControlPanel = (settings, guild) => {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('toggleJoinAlerts')
-      .setLabel(`👋 Join: ${settings.joinAlerts ? 'ON' : 'OFF'}`)
+      .setLabel(`👋 Join`)
       .setStyle(ButtonStyle.Primary),
 
     new ButtonBuilder()
       .setCustomId('toggleLeaveAlerts')
-      .setLabel(`🏃‍♂️ Leave: ${settings.leaveAlerts ? 'ON' : 'OFF'}`)
+      .setLabel(`🏃‍♂️ Leave`)
       .setStyle(ButtonStyle.Primary),
 
     new ButtonBuilder()
       .setCustomId('toggleOnlineAlerts')
-      .setLabel(`🟢 Online: ${settings.onlineAlerts ? 'ON' : 'OFF'}`)
+      .setLabel(`🟢 Online`)
       .setStyle(ButtonStyle.Primary)
   );
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('toggleAutoDelete')
-      .setLabel(`🧹 Auto-Delete: ${settings.autoDelete ? 'ON' : 'OFF'}`)
+      .setLabel(`🧹 Auto-Delete`)
       .setStyle(ButtonStyle.Success),
 
     new ButtonBuilder()
