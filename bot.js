@@ -148,7 +148,7 @@ function buildEmbedReply(title, description, color) {
     .setColor(color || 0x5865f2)
     .setAuthor({ name: title, iconURL: client.user?.displayAvatarURL() || "" })
     .setDescription(description)
-    .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user?.displayAvatarURL() || "" })
+    .setFooter({ text: "VC Alert Control Panel", iconURL: guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()})
     .setTimestamp();
 }
 
