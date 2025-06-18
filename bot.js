@@ -111,33 +111,36 @@ const buildControlPanel = (settings, guild) => {
 
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId("toggle_joinalerts")
-      .setEmoji("👋")
-      .setLabel(`Join Alerts: ${settings.joinAlerts ? "ON" : "OFF"}`)
-      .setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      .setCustomId('toggleJoinAlerts')
+      .setLabel(`👋 Join: ${settings.joinAlerts ? 'ON' : 'OFF'}`)
+      .setStyle(ButtonStyle.Primary),
+
     new ButtonBuilder()
-      .setCustomId("toggle_leavealerts")
-      .setEmoji("🚪")
-      .setLabel(`Leave Alerts: ${settings.leaveAlerts ? "ON" : "OFF"}`)
-      .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      .setCustomId('toggleLeaveAlerts')
+      .setLabel(`🚪 Leave: ${settings.leaveAlerts ? 'ON' : 'OFF'}`)
+      .setStyle(ButtonStyle.Primary),
+
     new ButtonBuilder()
-      .setCustomId("toggle_onlinealerts")
-      .setEmoji("🟢")
-      .setLabel(`Online Alerts: ${settings.onlineAlerts ? "ON" : "OFF"}`)
-      .setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
+      .setCustomId('toggleOnlineAlerts')
+      .setLabel(`🟢 Online: ${settings.onlineAlerts ? 'ON' : 'OFF'}`)
+      .setStyle(ButtonStyle.Primary)
   );
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId("toggle_autodelete")
-      .setEmoji("🧹")
-      .setLabel(`Auto-Delete: ${settings.autoDelete ? "ON" : "OFF"}`)
-      .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+      .setCustomId('toggleAutoDelete')
+      .setLabel(`🧹 Auto-Delete: ${settings.autoDelete ? 'ON' : 'OFF'}`)
+      .setStyle(ButtonStyle.Success),
+
     new ButtonBuilder()
-      .setCustomId("open_reset_confirm")
-      .setEmoji("♻️")
-      .setLabel("Reset Settings")
-      .setStyle(ButtonStyle.Danger)
+      .setCustomId('resetSettings')
+      .setLabel('♻️ Reset Settings')
+      .setStyle(ButtonStyle.Danger),
+
+    new ButtonBuilder()
+      .setCustomId('toggleVcAlerts')
+      .setLabel(`📢 Alerts: ${settings.alertsEnabled ? 'ON' : 'OFF'}`)
+      .setStyle(ButtonStyle.Secondary)
   );
 
   return { embed, rows: [row1, row2] };
