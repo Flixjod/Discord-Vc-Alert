@@ -284,7 +284,7 @@ client.on(Events.InteractionCreate, async interaction => {
         });
 
       case "confirmReset":
-        settings.alertsEnabled = true;
+        settings.alertsEnabled = false;
         settings.textChannelId = null;
         settings.autoDelete = true;
         settings.leaveAlerts = true;
