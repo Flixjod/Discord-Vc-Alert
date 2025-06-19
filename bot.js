@@ -258,8 +258,8 @@ client.on(Events.InteractionCreate, async interaction => {
   // Button interactions
   if (interaction.isButton()) {
     switch (interaction.customId) {
-      case "toggleAutoDelete":
-        settings.autoDelete = !settings.autoDelete;
+      case "toggleAlerts":
+        settings.alertsEnabled = !settings.alertsEnabled;
         break;
       case "toggleLeaveAlerts":
         settings.leaveAlerts = !settings.leaveAlerts;
@@ -269,6 +269,9 @@ client.on(Events.InteractionCreate, async interaction => {
         break;
       case "toggleOnlineAlerts":
         settings.onlineAlerts = !settings.onlineAlerts;
+        break;
+      case "toggleAutoDelete":
+        settings.autoDelete = !settings.autoDelete;
         break;
 
       case "resetSettings":
@@ -283,13 +286,7 @@ client.on(Events.InteractionCreate, async interaction => {
         });
 
       case "confirmReset":
-        settings.alertsEnabled = false;
-        settings.textChannelId = null;
-        settings.autoDelete = true;
-        settings.leaveAlerts = true;
-        settings.joinAlerts = true;
-        settings.onlineAlerts = true;
-        await settings.save();
+        settings = new GuildSettings({ guildId });
 
         const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, interaction.guild);
         const resetPanel = buildControlPanel(settings, interaction.guild);
