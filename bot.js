@@ -258,9 +258,6 @@ client.on(Events.InteractionCreate, async interaction => {
   // Button interactions
   if (interaction.isButton()) {
     switch (interaction.customId) {
-      case "toggleAlerts":
-        settings.alertsEnabled = !settings.alertsEnabled;
-        break;
       case "toggleLeaveAlerts":
         settings.leaveAlerts = !settings.leaveAlerts;
         break;
