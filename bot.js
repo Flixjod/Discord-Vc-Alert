@@ -34,7 +34,7 @@ const guildSettingsSchema = new mongoose.Schema({
 });
 const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
 
-// MongoDB connection
+// Connect MongoDB
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ Connected to MongoDB"))
   .catch(err => {
@@ -73,11 +73,11 @@ const commands = [
     .setDescription("🛑 Disable all alerts.")
 ].map(cmd => cmd.toJSON());
 
-// Slash command registration
 client.once("ready", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
+  
   client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" });
-
+  
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
   try {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -87,7 +87,6 @@ client.once("ready", async () => {
   }
 });
 
-// Helper: Embed panel
 const buildControlPanel = (settings, guild) => {
   const embed = new EmbedBuilder()
     .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
@@ -110,28 +109,38 @@ const buildControlPanel = (settings, guild) => {
     })
     .setTimestamp();
 
-  const row0 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('toggleMainAlerts')
-      .setLabel(settings.alertsEnabled ? '🔕 Disable Alerts' : '🔔 Enable Alerts')
-      .setStyle(settings.alertsEnabled ? ButtonStyle.Danger : ButtonStyle.Success)
-  );
-
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('toggleJoinAlerts').setLabel('👋 Join').setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('toggleLeaveAlerts').setLabel('🏃‍♂️ Leave').setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('toggleOnlineAlerts').setLabel('🟢 Online').setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    new ButtonBuilder()
+      .setCustomId('toggleJoinAlerts')
+      .setLabel('👋 Join')
+      .setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId('toggleLeaveAlerts')
+      .setLabel('🏃‍♂️ Leave')
+      .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId('toggleOnlineAlerts')
+      .setLabel('🟢 Online')
+      .setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
   );
 
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('toggleAutoDelete').setLabel('🧹 Auto-Delete').setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('resetSettings').setLabel('♻️ Reset Settings').setStyle(ButtonStyle.Danger)
+    new ButtonBuilder()
+      .setCustomId('toggleAutoDelete')
+      .setLabel('🧹 Auto-Delete')
+      .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId('resetSettings')
+      .setLabel('♻️ Reset Settings')
+      .setStyle(ButtonStyle.Danger)
   );
 
-  return { embed, rows: [row0, row1, row2] };
+  return { embed, rows: [row1, row2] };
 };
 
-// Helper: Embed reply
 function buildEmbedReply(title, description, color, guild) {
   return new EmbedBuilder()
     .setColor(color || 0x5865f2)
@@ -139,12 +148,10 @@ function buildEmbedReply(title, description, color, guild) {
     .setDescription(description)
     .setFooter({
       text: "VC Alert Control Panel",
-      iconURL: guild.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
-    })
+      iconURL: guild.iconURL({ dynamic: true }) || client.user.displayAvatarURL()})
     .setTimestamp();
 }
 
-// Interaction handler
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.inGuild()) return;
 
@@ -173,7 +180,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (!channel || channel.type !== ChannelType.GuildText) {
         return interaction.reply({
-          embeds: [buildEmbedReply("❌ Channel Missing", `I couldn't find a valid text channel.\nTry \`/vcon #channel\`.`, 0xff4444, guild)],
+          embeds: [buildEmbedReply(
+            "❌ Channel Missing",
+            `Hmm... I couldn't find a valid text channel to send alerts to.\n\nTry using:</br>• \`/vcon #your-channel\` to specify one\n• Or make sure the saved one still exists.`,
+            0xff4444,
+            guild
+          )],
           ephemeral: true
         });
       }
@@ -181,14 +193,24 @@ client.on(Events.InteractionCreate, async interaction => {
       const permissions = channel.permissionsFor(client.user);
       if (!permissions?.has("ViewChannel") || !permissions.has("SendMessages")) {
         return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", `I can't post in <#${channel.id}>.`, 0xff4444, guild)],
+          embeds: [buildEmbedReply(
+            "🚫 No Permission",
+            `I can’t post in <#${channel.id}>. Please make sure I have **View Channel** and **Send Messages** permission there.`,
+            0xff4444,
+            guild
+          )],
           ephemeral: true
         });
       }
 
       if (settings.alertsEnabled && settings.textChannelId === channel.id) {
         return interaction.reply({
-          embeds: [buildEmbedReply("⚠️ Already On", `VC alerts are already active in <#${channel.id}>.`, 0xffcc00, guild)],
+          embeds: [buildEmbedReply(
+            "⚠️ Already On",
+            `VC alerts are **already active** in <#${channel.id}> 🔊\n\nUse \`/vcstatus\` to manage join, leave, and online alerts. Or change the channel with \`/vcon #new-channel\`.`,
+            0xffcc00,
+            guild
+          )],
           ephemeral: true
         });
       }
@@ -198,7 +220,12 @@ client.on(Events.InteractionCreate, async interaction => {
       await settings.save();
 
       return interaction.reply({
-        embeds: [buildEmbedReply("✅ VC Alerts Enabled", `I'll post VC activity in <#${channel.id}>.`, 0x00ff88, guild)],
+        embeds: [buildEmbedReply(
+          "✅ VC Alerts Enabled",
+          `You're all set! I’ll now post voice activity in <#${channel.id}> 🎙️\n\nUse \`/vcstatus\` anytime to tweak the vibe — join, leave, and online alerts are all customizable. ✨`,
+          0x00ff88,
+          guild
+        )],
         ephemeral: true
       });
     }
@@ -206,7 +233,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.commandName === "vcoff") {
       if (!settings.alertsEnabled) {
         return interaction.reply({
-          embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off.", 0xffcc00, guild)],
+          embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", 0xffcc00, guild)],
           ephemeral: true
         });
       }
@@ -215,22 +242,27 @@ client.on(Events.InteractionCreate, async interaction => {
       await settings.save();
 
       return interaction.reply({
-        embeds: [buildEmbedReply("🔕 VC Alerts Disabled", "Alerts are now turned off.", 0xff4444, guild)],
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xff4444)
+            .setAuthor({ name: "VC Alerts Powered Down 🔕", iconURL: client.user.displayAvatarURL() })
+            .setDescription("🚫 No more **join**, **leave**, or **online** alerts.\nUse `/vcon` to re-enable anytime!")
+            .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+            .setTimestamp()
+        ],
         ephemeral: true
       });
     }
   }
 
+  // Button interactions
   if (interaction.isButton()) {
     switch (interaction.customId) {
-      case "toggleMainAlerts":
-        settings.alertsEnabled = !settings.alertsEnabled;
+      case "toggleLeaveAlerts":
+        settings.leaveAlerts = !settings.leaveAlerts;
         break;
       case "toggleJoinAlerts":
         settings.joinAlerts = !settings.joinAlerts;
-        break;
-      case "toggleLeaveAlerts":
-        settings.leaveAlerts = !settings.leaveAlerts;
         break;
       case "toggleOnlineAlerts":
         settings.onlineAlerts = !settings.onlineAlerts;
@@ -238,37 +270,37 @@ client.on(Events.InteractionCreate, async interaction => {
       case "toggleAutoDelete":
         settings.autoDelete = !settings.autoDelete;
         break;
+
       case "resetSettings":
         const confirmRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
         );
+
         return interaction.update({
-          embeds: [buildEmbedReply("⚠️ Confirm Reset", "Are you sure you want to reset all VC alert settings?", 0xffcc00, guild)],
+          embeds: [buildEmbedReply("⚠️ Confirm Settings Reset", "Are you sure you want to reset all VC alert settings to default?", 0xffcc00, interaction.guild)],
           components: [confirmRow]
         });
+
       case "confirmReset":
         settings = new GuildSettings({ guildId });
-        const resetPanel = buildControlPanel(settings, guild);
-        return interaction.update({
-          embeds: [
-            buildEmbedReply("✅ Settings Reset", "All settings have been restored to default.", 0x00ccff, guild),
-            resetPanel.embed
-          ],
-          components: resetPanel.rows
-        });
+
+        const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, interaction.guild);
+        const resetPanel = buildControlPanel(settings, interaction.guild);
+        return interaction.update({ embeds: [resetEmbed, resetPanel.embed], components: resetPanel.rows });
+
       case "cancelReset":
-        const cancelPanel = buildControlPanel(settings, guild);
+        const cancelPanel = buildControlPanel(settings, interaction.guild);
         return interaction.update({ embeds: [cancelPanel.embed], components: cancelPanel.rows });
     }
 
     await settings.save();
-    const updated = buildControlPanel(settings, guild);
+    const updated = buildControlPanel(settings, interaction.guild);
     return interaction.update({ embeds: [updated.embed], components: updated.rows });
   }
 });
 
-// VC join/leave alerts
+// VC join/leave alert
 client.on("voiceStateUpdate", async (oldState, newState) => {
   const guildId = newState.guild.id;
   const user = newState.member?.user || oldState.member?.user;
@@ -303,12 +335,15 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 });
 
-// Online alerts
+// Online alert
 client.on("presenceUpdate", async (oldPresence, newPresence) => {
   const member = newPresence.member;
   if (!member || member.user.bot) return;
 
-  if (newPresence.status !== "online") return;
+  const wasOffline = oldPresence?.status === "offline";
+  const isNowOnline = newPresence.status === "online";
+
+  if (!wasOffline || !isNowOnline) return;
 
   const settings = await GuildSettings.findOne({ guildId: member.guild.id });
   if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
@@ -327,5 +362,4 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
 });
 
-// Login
 client.login(process.env.TOKEN).catch(err => console.error("❌ Login failed:", err));
