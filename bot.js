@@ -340,10 +340,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   const member = newPresence.member;
   if (!member || member.user.bot) return;
 
-  const wasOffline = oldPresence?.status === "offline";
-  const isNowOnline = newPresence.status === "online";
-
-  if (!wasOffline || !isNowOnline) return;
+  if (newPresence.status !== "online") return;
 
   const settings = await GuildSettings.findOne({ guildId: member.guild.id });
   if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
