@@ -270,6 +270,17 @@ client.on(Events.InteractionCreate, async interaction => {
       case "toggleAutoDelete":
         settings.autoDelete = !settings.autoDelete;
         break;
+      case "resetSettings":
+        const confirmRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
+        );
+
+        return interaction.update({
+          embeds: [buildEmbedReply("⚠️ Confirm Settings Reset", "Are you sure you want to reset all VC alert settings to default?", 0xffcc00, interaction.guild)],
+          components: [confirmRow]
+        });
+
       case "confirmReset":
         await GuildSettings.deleteOne({ guildId });
         settings = new GuildSettings({ guildId });
