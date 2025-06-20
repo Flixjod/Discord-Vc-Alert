@@ -278,13 +278,6 @@ client.on(Events.InteractionCreate, async interaction => {
         const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, interaction.guild);
         const resetPanel = buildControlPanel(settings, interaction.guild);
         return interaction.update({ embeds: [resetEmbed, resetPanel.embed], components: resetPanel.rows });
-      case "confirmReset":
-        settings = new GuildSettings({ guildId });
-
-        const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, interaction.guild);
-        const resetPanel = buildControlPanel(settings, interaction.guild);
-        return interaction.update({ embeds: [resetEmbed, resetPanel.embed], components: resetPanel.rows });
-
       case "cancelReset":
         const cancelPanel = buildControlPanel(settings, interaction.guild);
         return interaction.update({ embeds: [cancelPanel.embed], components: cancelPanel.rows });
