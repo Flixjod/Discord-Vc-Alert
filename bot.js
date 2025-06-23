@@ -16,14 +16,21 @@ const {
 const mongoose = require("mongoose");
 
 // Audio On Join
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, entersState, VoiceConnectionStatus, StreamType } = require('@discordjs/voice');
-const { getVoiceConnection } = require('@discordjs/voice');
-const fetch = require('node-fetch');
-const fs = require('fs');
-const path = require('path');
-const { pipeline } = require('stream');
-const { promisify } = require('util');
-const streamPipeline = promisify(pipeline);
+const { 
+  joinVoiceChannel, 
+  createAudioPlayer, 
+  createAudioResource, 
+  AudioPlayerStatus, 
+  entersState, 
+  VoiceConnectionStatus, 
+  getVoiceConnection, 
+  StreamType 
+} = require("@discordjs/voice");
+const { EmbedBuilder } = require("discord.js");
+const path = require("path");
+const fetch = require("node-fetch");
+const { Readable } = require("stream");
+
 require("dotenv").config();
 
 // Web server
@@ -344,21 +351,30 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     // Voice On Join
     if (settings.playAudioOnJoin && process.env.JOIN_AUDIO) {
       try {
+        const existing = getVoiceConnection(guildId);
+        if (existing) existing.destroy();
+
         const connection = joinVoiceChannel({
           channelId: newState.channel.id,
-          guildId: newState.guild.id,
-          adapterCreator: newState.guild.voiceAdapterCreator
+          guildId: guildId,
+          adapterCreator: newState.guild.voiceAdapterCreator,
+          selfDeaf: false,
         });
 
         await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
 
-        let resource;
         const audioSource = process.env.JOIN_AUDIO;
+        let resource;
 
         if (audioSource.startsWith("http://") || audioSource.startsWith("https://")) {
           const response = await fetch(audioSource);
           if (!response.ok) throw new Error(`HTTP error ${response.status}`);
-          resource = createAudioResource(response.body, { inputType: StreamType.Arbitrary });
+
+          const arrayBuffer = await response.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          const stream = Readable.from(buffer);
+
+          resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
         } else {
           resource = createAudioResource(path.resolve(audioSource));
         }
@@ -370,6 +386,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         player.once(AudioPlayerStatus.Idle, () => {
           connection.destroy();
         });
+
       } catch (err) {
         console.error("❌ Failed to play join audio:", err);
       }
