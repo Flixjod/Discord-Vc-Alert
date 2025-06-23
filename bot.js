@@ -15,21 +15,6 @@ const {
 } = require("discord.js");
 const mongoose = require("mongoose");
 
-// Audio On Join
-const { 
-  joinVoiceChannel, 
-  createAudioPlayer, 
-  createAudioResource, 
-  AudioPlayerStatus, 
-  entersState, 
-  VoiceConnectionStatus, 
-  getVoiceConnection, 
-  StreamType 
-} = require("@discordjs/voice");
-const path = require("path");
-const fetch = require("node-fetch");
-const { Readable } = require("stream");
-
 require("dotenv").config();
 
 // Web server
@@ -46,7 +31,6 @@ const guildSettingsSchema = new mongoose.Schema({
   joinAlerts: { type: Boolean, default: true },
   leaveAlerts: { type: Boolean, default: true },
   onlineAlerts: { type: Boolean, default: true },
-  playAudioOnJoin: { type: Boolean, default: false },
   autoDelete: { type: Boolean, default: true }
 });
 const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
@@ -148,11 +132,6 @@ const buildControlPanel = (settings, guild) => {
       .setCustomId('toggleAutoDelete')
       .setLabel('🧹 Auto-Delete')
       .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId('toggleAudioOnJoin')
-      .setLabel('🔊 Join-Sound')
-      .setStyle(settings.playAudioOnJoin ? ButtonStyle.Success : ButtonStyle.Secondary),
 
     new ButtonBuilder()
       .setCustomId('resetSettings')
@@ -292,9 +271,6 @@ client.on(Events.InteractionCreate, async interaction => {
       case "toggleAutoDelete":
         settings.autoDelete = !settings.autoDelete;
         break;
-      case "toggleAudioOnJoin":
-        settings.playAudioOnJoin = !settings.playAudioOnJoin;
-        break;
       case "resetSettings":
         const confirmRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
@@ -346,50 +322,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
       .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
-
-    // Voice On Join
-    if (settings.playAudioOnJoin && process.env.JOIN_AUDIO) {
-      try {
-        const existing = getVoiceConnection(guildId);
-        if (existing) existing.destroy();
-
-        const connection = joinVoiceChannel({
-          channelId: newState.channel.id,
-          guildId: guildId,
-          adapterCreator: newState.guild.voiceAdapterCreator,
-          selfDeaf: false,
-        });
-
-        await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-
-        const audioSource = process.env.JOIN_AUDIO;
-        let resource;
-
-        if (audioSource.startsWith("http://") || audioSource.startsWith("https://")) {
-          const response = await fetch(audioSource);
-          if (!response.ok) throw new Error(`HTTP error ${response.status}`);
-
-          const arrayBuffer = await response.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-          const stream = Readable.from(buffer);
-
-          resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
-        } else {
-          resource = createAudioResource(path.resolve(audioSource));
-        }
-
-        const player = createAudioPlayer();
-        connection.subscribe(player);
-        player.play(resource);
-
-        player.once(AudioPlayerStatus.Idle, () => {
-          connection.destroy();
-        });
-
-      } catch (err) {
-        console.error("❌ Failed to play join audio:", err);
-      }
-    }
 
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
