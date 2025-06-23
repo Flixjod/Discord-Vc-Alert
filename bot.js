@@ -13,7 +13,6 @@ const {
   ButtonStyle,
   Events
 } = require("discord.js");
-const path = require('path');
 const mongoose = require("mongoose");
 
 // Audio On Join
