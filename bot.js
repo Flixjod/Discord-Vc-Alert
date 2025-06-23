@@ -318,14 +318,14 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     embed = new EmbedBuilder()
       .setColor(0x00ffcc)
       .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: user.displayAvatarURL({ dynamic: true }) })
-      .setDescription(`🎧 **${displayName}** joined **${newState.channel.name}** — Let the vibes begin!`)
+      .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
       .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
       .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: user.displayAvatarURL({ dynamic: true }) })
-      .setDescription(`👋 **${displayName}** left **${oldState.channel.name}** — See ya next time!`)
+      .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   }
@@ -352,7 +352,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   const embed = new EmbedBuilder()
     .setColor(0x55ff55)
     .setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
-    .setDescription(`👀 **${member.displayName;}** is now online — something's cooking!`)
+    .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
     .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
     .setTimestamp();
 
