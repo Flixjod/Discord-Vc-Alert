@@ -40,7 +40,7 @@ const guildSettingsSchema = new mongoose.Schema({
   joinAlerts: { type: Boolean, default: true },
   leaveAlerts: { type: Boolean, default: true },
   onlineAlerts: { type: Boolean, default: true },
-  playAudioOnJoin: { type: Boolean, default: false }
+  playAudioOnJoin: { type: Boolean, default: false },
   autoDelete: { type: Boolean, default: true }
 });
 const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
