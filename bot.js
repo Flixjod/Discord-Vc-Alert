@@ -26,7 +26,6 @@ const {
   getVoiceConnection, 
   StreamType 
 } = require("@discordjs/voice");
-const { EmbedBuilder } = require("discord.js");
 const path = require("path");
 const fetch = require("node-fetch");
 const { Readable } = require("stream");
