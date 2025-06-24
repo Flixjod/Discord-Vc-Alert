@@ -1,17 +1,17 @@
-FROM node:20-slim
+FROM node:20
 
-# Install FFmpeg
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install build tools required for native module compilation
+RUN apt-get update && apt-get install -y build-essential python3
 
-# Create app directory
+# Set working directory
 WORKDIR /usr/src/app
 
-# Copy and install dependencies
+# Copy package files and install dependencies
 COPY package*.json ./
 RUN npm install
 
-# Copy bot files
+# Copy the rest of the app
 COPY . .
 
-# Start the bot
-CMD ["npm", "start"]
+# Start your bot
+CMD ["node", "index.js"]
