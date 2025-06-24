@@ -303,13 +303,14 @@ client.on(Events.InteractionCreate, async interaction => {
         const cancelPanel = buildControlPanel(settings, guild);
         return interaction.update({
           embeds: [cancelPanel.embed],
-          components: cancelPanel.components
+          components: cancelPanel.buttons
         });
     }
 
     await settings.save();
-    const { embed, components } = buildControlPanel(settings, guild);
-    await interaction.update({ embeds: [embed], buttons: [row] });
+    const { embed, buttons } = buildControlPanel(settings, guild);
+    await interaction.update({ embeds: [embed], components: buttons });
+
   }
 });
 
