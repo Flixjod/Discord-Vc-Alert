@@ -1,34 +1,17 @@
-# -------- STAGE 1: Build native modules --------
-FROM node:20-slim as build
+# Use official Node.js 20 image
+FROM node:20
 
-# Install build tools for native dependencies
-RUN apt-get update && apt-get install -y \
-  build-essential \
-  python3 \
-  && rm -rf /var/lib/apt/lists/*
+# Set working directory
+WORKDIR /app
 
-WORKDIR /usr/src/app
-
-# Copy and install dependencies (builds @discordjs/opus from source if needed)
+# Copy package.json and package-lock.json (if available)
 COPY package*.json ./
+
+# Install dependencies
 RUN npm install
 
-# Copy rest of the bot code
+# Copy the rest of your bot code
 COPY . .
 
-# -------- STAGE 2: Runtime (smaller image) --------
-FROM node:20-slim
-
-# Install only necessary runtime deps (ffmpeg & sodium)
-RUN apt-get update && apt-get install -y \
-  ffmpeg \
-  libsodium18 \
-  && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /usr/src/app
-
-# Copy everything from build stage
-COPY --from=build /usr/src/app /usr/src/app
-
-# Start your bot
-CMD ["node", "bot.js"]
+# Start the bot
+CMD ["npm", "start"]
