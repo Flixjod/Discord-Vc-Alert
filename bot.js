@@ -139,7 +139,7 @@ const buildControlPanel = (settings, guild) => {
       .setStyle(ButtonStyle.Danger)
   );
 
-  return { embed, rows: [row1, row2] };
+  return { embed, components: [row1, row2] };
 };
 
 function buildEmbedReply(title, description, color, guild) {
@@ -167,8 +167,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "vcstatus") {
-      const { embed, rows } = buildControlPanel(settings, guild);
-      return interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
+      const { embed, components } = buildControlPanel(settings, guild);
+      interaction.reply({ embeds: [embed], components, ephemeral: true });
     }
 
     if (interaction.commandName === "vcon") {
@@ -287,17 +287,29 @@ client.on(Events.InteractionCreate, async interaction => {
         settings = new GuildSettings({ guildId });
         await settings.save(); // ✅ Save the reset settings
 
-        const resetEmbed = buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, interaction.guild);
+        const resetEmbed = buildEmbedReply(
+          "✅ Settings Reset",
+          "All settings have been restored to default. 🎯",
+          0x00ccff,
+          interaction.guild
+        );
         const resetPanel = buildControlPanel(settings, interaction.guild);
-        return interaction.update({ embeds: [resetEmbed, resetPanel.embed], components: resetPanel.rows });
+        return interaction.update({
+          embeds: [resetEmbed, resetPanel.embed],
+          components: resetPanel.components
+        });
+
       case "cancelReset":
         const cancelPanel = buildControlPanel(settings, interaction.guild);
-        return interaction.update({ embeds: [cancelPanel.embed], components: cancelPanel.rows });
+        return interaction.update({
+          embeds: [cancelPanel.embed],
+          components: cancelPanel.components
+        });
     }
 
     await settings.save();
-    const updated = buildControlPanel(settings, interaction.guild);
-    return interaction.update({ embeds: [updated.embed], components: updated.rows });
+    const { embed, components } = buildControlPanel(settings, guild);
+    interaction.reply({ embeds: [embed], components, ephemeral: true });
   }
 });
 
