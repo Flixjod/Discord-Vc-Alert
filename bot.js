@@ -139,7 +139,7 @@ const buildControlPanel = (settings, guild) => {
       .setStyle(ButtonStyle.Danger)
   );
 
-  return { embed, components: [row1, row2] };
+  return { embed, buttons: [row1, row2] };
 };
 
 function buildEmbedReply(title, description, color, guild) {
@@ -293,14 +293,14 @@ client.on(Events.InteractionCreate, async interaction => {
           0x00ccff,
           interaction.guild
         );
-        const resetPanel = buildControlPanel(settings, interaction.guild);
+        const resetPanel = buildControlPanel(settings, guild);
         return interaction.update({
           embeds: [resetEmbed, resetPanel.embed],
           components: resetPanel.components
         });
 
       case "cancelReset":
-        const cancelPanel = buildControlPanel(settings, interaction.guild);
+        const cancelPanel = buildControlPanel(settings, guild);
         return interaction.update({
           embeds: [cancelPanel.embed],
           components: cancelPanel.components
@@ -309,7 +309,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     await settings.save();
     const { embed, components } = buildControlPanel(settings, guild);
-    interaction.reply({ embeds: [embed], components, ephemeral: true });
+    await interaction.update({ embeds: [embed], buttons: [row] });
   }
 });
 
