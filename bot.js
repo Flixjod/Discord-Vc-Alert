@@ -15,6 +15,18 @@ const {
 } = require("discord.js");
 const mongoose = require("mongoose");
 
+
+// Audio join
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  StreamType,
+  getVoiceConnection,
+} = require("@discordjs/voice");
+const { request } = require("undici");
+
 require("dotenv").config();
 
 // Web server
@@ -315,6 +327,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   if (!channel?.send) return;
 
   let embed = null;
+
+  // === JOIN EVENT ===
   if (!oldState.channel && newState.channel && settings.joinAlerts) {
     embed = new EmbedBuilder()
       .setColor(0x00ffcc)
@@ -323,6 +337,49 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
 
+    // === VC AUDIO JOIN & PLAY ===
+    const alreadyConnected = getVoiceConnection(guildId);
+    if (!alreadyConnected) {
+      try {
+        const connection = joinVoiceChannel({
+          channelId: newState.channel.id,
+          guildId: guildId,
+          adapterCreator: newState.guild.voiceAdapterCreator,
+          selfDeaf: false,
+        });
+
+        const player = createAudioPlayer();
+        connection.subscribe(player);
+
+        const stream = await request(process.env.VC_AUDIO_URL).then(res => res.body);
+        const resource = createAudioResource(stream, {
+          inputType: StreamType.Arbitrary,
+        });
+
+        player.play(resource);
+
+        // Leave after 10 minutes
+        const leaveTimeout = setTimeout(() => {
+          connection.destroy();
+        }, 10 * 60 * 1000);
+
+        // Clean up on error or finish
+        player.on("error", err => {
+          console.error("Audio Playback Error:", err);
+          clearTimeout(leaveTimeout);
+          connection.destroy();
+        });
+
+        player.on(AudioPlayerStatus.Idle, () => {
+          // You can disconnect here early if desired
+        });
+
+      } catch (err) {
+        console.error("VC Join/Playback Error:", err);
+      }
+    }
+
+  // === LEAVE EVENT ===
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
