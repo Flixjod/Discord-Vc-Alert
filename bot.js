@@ -26,6 +26,11 @@ const {
   getVoiceConnection,
 } = require("@discordjs/voice");
 const { request } = require("undici");
+// Ensure libsodium is ready before voice connections
+const sodium = require('libsodium-wrappers');
+await sodium.ready;
+import { generateDependencyReport } from '@discordjs/voice';
+console.log(generateDependencyReport());
 
 require("dotenv").config();
 
