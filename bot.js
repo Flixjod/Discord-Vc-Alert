@@ -296,7 +296,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const resetPanel = buildControlPanel(settings, guild);
         return interaction.update({
           embeds: [resetEmbed, resetPanel.embed],
-          components: resetPanel.components
+          components: resetPanel.buttons
         });
 
       case "cancelReset":
