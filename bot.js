@@ -167,8 +167,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "vcstatus") {
-      const { embed, components } = buildControlPanel(settings, guild);
-      interaction.reply({ embeds: [embed], components, ephemeral: true });
+      const { embed, buttons } = buildControlPanel(settings, guild);
+      interaction.reply({ embeds: [embed], buttons, ephemeral: true });
     }
 
     if (interaction.commandName === "vcon") {
