@@ -444,18 +444,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
     if (!thread) return;
 
-    const guildMembers = await vc.guild.members.fetch(); // fetch all guild members
+    const allowedMembers = vc.members.filter(m =>
+      !m.user.bot &&
+      (!settings.ignoreRoleEnabled || !m.roles.cache.has(settings.ignoredRoleId)) &&
+      vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
+    );
 
-    guildMembers.forEach(member => {
-      if (
-        member.user.bot ||
-        (settings.ignoreRoleEnabled && settings.ignoredRoleId && member.roles.cache.has(settings.ignoredRoleId))
-      ) return;
-
-      if (vc.permissionsFor(member).has(PermissionsBitField.Flags.ViewChannel)) {
-        thread.members.add(member.id).catch(() => {});
-      }
-    });
+    // Add VC members to thread before sending message
+    for (const [id, member] of allowedMembers) {
+      await thread.members.add(id).catch(() => {});
+    }
 
     const msg = await thread.send({ embeds: [embed] }).catch(() => null);
 
