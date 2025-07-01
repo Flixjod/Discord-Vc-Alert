@@ -413,7 +413,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 
   const vc = newState.channel || oldState.channel;
-  const isPrivateVC = vc?.permissionOverwrites?.size > 0;
+  const everyoneRole = vc.guild.roles.everyone;
+  const isPrivateVC = !vc.permissionsFor(everyoneRole).has(PermissionsBitField.Flags.ViewChannel);
 
   if (isPrivateVC && settings.privateThreadAlerts) {
     const thread = await logChannel.threads.create({
