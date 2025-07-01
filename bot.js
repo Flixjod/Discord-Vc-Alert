@@ -2,6 +2,7 @@ const express = require("express");
 const {
   Client,
   GatewayIntentBits,
+  PermissionsBitField,
   Partials,
   EmbedBuilder,
   REST,
@@ -381,9 +382,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!user || user.bot) return;
 
   const settings = await GuildSettings.findOne({ guildId: newState.guild.id });
-  if (!settings || !settings.enabled || !settings.channelId) return;
+  if (!settings || !settings.alertsEnabled || !settings.textChannelId) return;
 
-  const logChannel = newState.guild.channels.cache.get(settings.channelId);
+  const logChannel = newState.guild.channels.cache.get(settings.textChannelId);
   if (!logChannel || !logChannel.isTextBased()) return;
 
   if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
@@ -426,7 +427,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const guildMembers = await vc.guild.members.fetch(); // make sure all are loaded
     const allowedMembers = guildMembers.filter(m =>
       !m.user.bot &&
-      (!ignoredRole || !m.roles.cache.has(ignoredRole)) &&
       vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
     );
 
@@ -434,14 +434,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       await thread.members.add(m.id).catch(() => {});
     }
 
-    const msg = await thread.send({ embeds: [embed] }).catch(() => null);
     if (msg && settings.autoDelete) {
-      setTimeout(() => thread.delete().catch(() => {}), 30_000);
-    }
-  } else {
-    const msg = await logChannel.send({ embeds: [embed] }).catch(() => null);
-    if (msg && settings.autoDelete) {
-      setTimeout(() => msg.delete().catch(() => {}), 30_000);
+      setTimeout(async () => {
+        await msg.delete().catch(() => {});
+        await thread.delete().catch(() => {});
+      }, 30_000);
     }
   }
 });
