@@ -376,8 +376,9 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   if (!settings?.alertsEnabled || !settings.textChannelId) return;
 
   if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
-    const memberRoles = newState.member?.roles || oldState.member?.roles;
-    if (memberRoles?.cache.has(settings.ignoredRoleId)) return;
+    const member = newState.member || oldState.member;
+    const freshMember = await member?.guild.members.fetch(member.id).catch(() => null);
+    if (freshMember?.roles.cache.has(settings.ignoredRoleId)) return;
   }
 
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
@@ -417,7 +418,10 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   const settings = await GuildSettings.findOne({ guildId: member.guild.id });
   if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
 
-  if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member.roles.cache.has(settings.ignoredRoleId)) return;
+  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
+    const freshMember = await member.guild.members.fetch(member.id).catch(() => null);
+    if (freshMember?.roles.cache.has(settings.ignoredRoleId)) return;
+  }
 
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
   if (!channel?.send) return;
