@@ -424,7 +424,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }).catch(() => null);
     if (!thread) return;
 
-    const guildMembers = await vc.guild.members.fetch(); // make sure all are loaded
+    const guildMembers = await vc.guild.members.fetch();
     const allowedMembers = guildMembers.filter(m =>
       !m.user.bot &&
       vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
@@ -434,11 +434,18 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       await thread.members.add(m.id).catch(() => {});
     }
 
+    const msg = await thread.send({ embeds: [embed] }).catch(() => null);
+
     if (msg && settings.autoDelete) {
       setTimeout(async () => {
         await msg.delete().catch(() => {});
         await thread.delete().catch(() => {});
       }, 30_000);
+    }
+  } else {
+    const msg = await logChannel.send({ embeds: [embed] }).catch(() => null);
+    if (msg && settings.autoDelete) {
+      setTimeout(() => msg.delete().catch(() => {}), 30_000);
     }
   }
 });
