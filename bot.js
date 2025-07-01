@@ -387,9 +387,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const logChannel = newState.guild.channels.cache.get(settings.textChannelId);
   if (!logChannel || !logChannel.isTextBased()) return;
 
-  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
-    const member = newState.member || oldState.member;
-    if (member?.roles.cache.has(settings.ignoredRoleId)) return;
+  const member = newState.member || oldState.member;
+  if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member?.roles.cache.has(settings.ignoredRoleId)) {
+    return;
   }
 
   let embed;
@@ -409,11 +409,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   } else {
-    return;
+    return; // Not a join/leave event or not enabled
   }
 
   const vc = newState.channel || oldState.channel;
-  const isPrivateVC = vc.permissionOverwrites?.size > 0;
+  const isPrivateVC = vc?.permissionOverwrites?.size > 0;
 
   if (isPrivateVC && settings.privateThreadAlerts) {
     const thread = await logChannel.threads.create({
@@ -422,16 +422,17 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       type: ChannelType.PrivateThread,
       reason: `Private VC alert for ${user.username}`,
     }).catch(() => null);
+
     if (!thread) return;
 
-    const guildMembers = await vc.guild.members.fetch();
-    const allowedMembers = guildMembers.filter(m =>
+    const allowedMembers = vc.members.filter(m =>
       !m.user.bot &&
+      (!settings.ignoreRoleEnabled || !m.roles.cache.has(settings.ignoredRoleId)) &&
       vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
     );
 
-    for (const m of allowedMembers.values()) {
-      await thread.members.add(m.id).catch(() => {});
+    for (const [id] of allowedMembers) {
+      await thread.members.add(id).catch(() => {});
     }
 
     const msg = await thread.send({ embeds: [embed] }).catch(() => null);
@@ -442,7 +443,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         await thread.delete().catch(() => {});
       }, 30_000);
     }
-  } else {
+  } else if (!isPrivateVC) {
     const msg = await logChannel.send({ embeds: [embed] }).catch(() => null);
     if (msg && settings.autoDelete) {
       setTimeout(() => msg.delete().catch(() => {}), 30_000);
