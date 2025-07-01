@@ -74,7 +74,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName("vcoff")
     .setDescription("🛑 Disable all alerts."),
-
   new SlashCommandBuilder()
   .setName("setignorerole")
   .setDescription("🙈 Set a role to be ignored from VC/online alerts")
@@ -82,7 +81,11 @@ const commands = [
     option.setName("role")
       .setDescription("The role to ignore from alerts")
       .setRequired(true)
-  )
+  ),
+  new SlashCommandBuilder()
+    .setName("resetignorerole")
+    .setDescription("♻️ Reset the ignored role")
+
 ].map(cmd => cmd.toJSON());
 
 client.once("ready", async () => {
@@ -284,6 +287,22 @@ client.on(Events.InteractionCreate, async interaction => {
         embeds: [buildEmbedReply(
           "✅ Ignored Role Set",
           `Members with the role ${role} will now be ignored from VC and online alerts.`,
+          0x00ccff,
+          interaction.guild
+        )],
+        ephemeral: true
+      });
+    }
+
+    if (interaction.commandName === "resetignorerole") {
+      settings.ignoredRoleId = null;
+      settings.ignoreRoleEnabled = false;
+      await settings.save();
+
+      return interaction.reply({
+        embeds: [buildEmbedReply(
+          "♻️ Ignored Role Reset",
+          "The ignored role has been removed. All members will now be included in alerts.",
           0x00ccff,
           interaction.guild
         )],
