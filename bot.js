@@ -366,25 +366,22 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 // VC join/leave alert
-client.on("voiceStateUpdate", async (oldState, newState) => {
-  const guildId = newState.guild.id;
+client.on('voiceStateUpdate', async (oldState, newState) => {
   const user = newState.member?.user || oldState.member?.user;
-  const displayName = newState.member?.displayName || oldState.member?.displayName || user.username;
-  if (!guildId || !user || user.bot) return;
+  if (!user || user.bot) return;
 
-  const settings = await GuildSettings.findOne({ guildId });
-  if (!settings?.alertsEnabled || !settings.textChannelId) return;
+  const settings = await getSettings(newState.guild.id);
+  if (!settings || !settings.enabled || !settings.channelId) return;
 
-  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
-    const member = newState.member || oldState.member;
-    const freshMember = await member?.guild.members.fetch(member.id).catch(() => null);
-    if (freshMember?.roles.cache.has(settings.ignoredRoleId)) return;
-  }
+  const logChannel = newState.guild.channels.cache.get(settings.channelId);
+  if (!logChannel || !logChannel.isTextBased()) return;
 
-  const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
-  if (!channel?.send) return;
+  const ignoredRole = settings.ignoredRoleId;
+  const member = newState.member || oldState.member;
+  if (ignoredRole && member.roles.cache.has(ignoredRole)) return;
 
-  let embed = null;
+  let embed;
+
   if (!oldState.channel && newState.channel && settings.joinAlerts) {
     embed = new EmbedBuilder()
       .setColor(0x00ffcc)
@@ -392,7 +389,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
       .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
-
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
@@ -400,11 +396,42 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
+  } else {
+    return;
   }
 
-  if (embed) {
-    const msg = await channel.send({ embeds: [embed] }).catch(() => null);
-    if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
+  const vc = newState.channel || oldState.channel;
+  const isPrivateVC = vc.permissionOverwrites?.size > 0;
+
+  if (isPrivateVC) {
+    const thread = await logChannel.threads.create({
+      name: `🔊 VC Alert (${user.username})`,
+      autoArchiveDuration: 60,
+      type: ChannelType.PrivateThread,
+      reason: `Private VC alert for ${user.username}`,
+    }).catch(() => null);
+    if (!thread) return;
+
+    const guildMembers = await vc.guild.members.fetch(); // make sure all are loaded
+    const allowedMembers = guildMembers.filter(m =>
+      !m.user.bot &&
+      (!ignoredRole || !m.roles.cache.has(ignoredRole)) &&
+      vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
+    );
+
+    for (const m of allowedMembers.values()) {
+      await thread.members.add(m.id).catch(() => {});
+    }
+
+    const msg = await thread.send({ embeds: [embed] }).catch(() => null);
+    if (msg && settings.autoDelete) {
+      setTimeout(() => thread.delete().catch(() => {}), 30_000);
+    }
+  } else {
+    const msg = await logChannel.send({ embeds: [embed] }).catch(() => null);
+    if (msg && settings.autoDelete) {
+      setTimeout(() => msg.delete().catch(() => {}), 30_000);
+    }
   }
 });
 
