@@ -115,7 +115,7 @@ const buildControlPanel = (settings, guild) => {
       `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
+      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n` +
       `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅" : "❌"})` : "None"}\n\n` +
       `Use the buttons below to customize your settings on the fly! ⚙️`
     )
@@ -188,8 +188,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "vcstatus") {
-      const { embed, buttons } = buildControlPanel(settings, guild);
-      interaction.reply({ embeds: [embed], buttons, ephemeral: true });
+      const panel = buildControlPanel(settings, guild);
+      return interaction.reply({ embeds: [panel.embed], components: panel.buttons, ephemeral: true });
     }
 
     if (interaction.commandName === "vcon") {
@@ -342,17 +342,9 @@ client.on(Events.InteractionCreate, async interaction => {
         settings = new GuildSettings({ guildId });
         await settings.save(); // ✅ Save the reset settings
 
-        const resetEmbed = buildEmbedReply(
-          "✅ Settings Reset",
-          "All settings have been restored to default. 🎯",
-          0x00ccff,
-          interaction.guild
-        );
-        const resetPanel = buildControlPanel(settings, guild);
-        return interaction.update({
-          embeds: [resetEmbed, resetPanel.embed],
-          components: resetPanel.buttons
-        });
+        const newPanel = buildControlPanel(settings, guild);
+        return interaction.update({ embeds: [buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, guild), newPanel.embed], components: newPanel.buttons });
+
 
       case "cancelReset":
         const cancelPanel = buildControlPanel(settings, guild);
@@ -367,8 +359,8 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     await settings.save();
-    const { embed, buttons } = buildControlPanel(settings, guild);
-    await interaction.update({ embeds: [embed], components: buttons });
+    const updatedPanel = buildControlPanel(settings, guild);
+    return interaction.update({ embeds: [updatedPanel.embed], components: updatedPanel.buttons });
 
   }
 });
@@ -425,9 +417,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   const settings = await GuildSettings.findOne({ guildId: member.guild.id });
   if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
 
-  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
-    if (member.roles.cache.has(settings.ignoredRoleId)) return;
-  }
+  if (settings.ignoreEnabled && settings.ignoreRoleId && member.roles.cache.has(settings.ignoreRoleId)) return;
 
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
   if (!channel?.send) return;
