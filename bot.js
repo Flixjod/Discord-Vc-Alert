@@ -384,27 +384,40 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const settings = await GuildSettings.findOne({ guildId: newState.guild.id });
   if (!settings || !settings.alertsEnabled || !settings.textChannelId) return;
 
-  const logChannel = newState.guild.channels.cache.get(settings.textChannelId);
-  if (!logChannel || !logChannel.isTextBased()) return;
+  let logChannel = newState.guild.channels.cache.get(settings.textChannelId);
+  if (!logChannel || !logChannel.isTextBased()) {
+    try {
+      logChannel = await newState.guild.channels.fetch(settings.textChannelId);
+    } catch {
+      return;
+    }
+    if (!logChannel?.isTextBased()) return;
+  }
 
   const member = newState.member || oldState.member;
   if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member?.roles.cache.has(settings.ignoredRoleId)) {
     return;
   }
 
+  // Skip move events
+  if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+    return;
+  }
+
+  const avatar = user.displayAvatarURL({ dynamic: true });
   let embed;
 
   if (!oldState.channel && newState.channel && settings.joinAlerts) {
     embed = new EmbedBuilder()
       .setColor(0x00ffcc)
-      .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: user.displayAvatarURL({ dynamic: true }) })
+      .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar })
       .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
       .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
-      .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: user.displayAvatarURL({ dynamic: true }) })
+      .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar })
       .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
@@ -413,6 +426,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 
   const vc = newState.channel || oldState.channel;
+  if (!vc) return;
+
   const everyoneRole = vc.guild.roles.everyone;
   const isPrivateVC = !vc.permissionsFor(everyoneRole).has(PermissionsBitField.Flags.ViewChannel);
 
@@ -422,19 +437,25 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       autoArchiveDuration: 60,
       type: ChannelType.PrivateThread,
       reason: `Private VC alert for ${user.username}`,
-    }).catch(() => null);
+    }).catch(err => {
+      console.error("Failed to create thread:", err);
+      return null;
+    });
 
     if (!thread) return;
 
-    const allowedMembers = vc.members.filter(m =>
-      !m.user.bot &&
-      (!settings.ignoreRoleEnabled || !m.roles.cache.has(settings.ignoredRoleId)) &&
-      vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
-    );
+    const guildMembers = await vc.guild.members.fetch(); // fetch all guild members
 
-    for (const [id] of allowedMembers) {
-      await thread.members.add(id).catch(() => {});
-    }
+    guildMembers.forEach(member => {
+      if (
+        member.user.bot ||
+        (settings.ignoreRoleEnabled && settings.ignoredRoleId && member.roles.cache.has(settings.ignoredRoleId))
+      ) return;
+
+      if (vc.permissionsFor(member).has(PermissionsBitField.Flags.ViewChannel)) {
+        thread.members.add(member.id).catch(() => {});
+      }
+    });
 
     const msg = await thread.send({ embeds: [embed] }).catch(() => null);
 
