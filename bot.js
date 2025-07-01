@@ -31,7 +31,9 @@ const guildSettingsSchema = new mongoose.Schema({
   joinAlerts: { type: Boolean, default: true },
   leaveAlerts: { type: Boolean, default: true },
   onlineAlerts: { type: Boolean, default: true },
-  autoDelete: { type: Boolean, default: true }
+  autoDelete: { type: Boolean, default: true },
+  ignoredRoleId: { type: String, default: null }, // NEW
+  ignoreRoleEnabled: { type: Boolean, default: false } // NEW
 });
 const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
 
@@ -71,7 +73,16 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName("vcoff")
-    .setDescription("🛑 Disable all alerts.")
+    .setDescription("🛑 Disable all alerts."),
+
+  new SlashCommandBuilder()
+  .setName("setignorerole")
+  .setDescription("🙈 Set a role to be ignored from VC/online alerts")
+  .addRoleOption(option =>
+    option.setName("role")
+      .setDescription("The role to ignore from alerts")
+      .setRequired(true)
+  )
 ].map(cmd => cmd.toJSON());
 
 client.once("ready", async () => {
@@ -102,6 +113,7 @@ const buildControlPanel = (settings, guild) => {
       `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
+      `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅" : "❌"})` : "None"}\n\n` +
       `Use the buttons below to customize your settings on the fly! ⚙️`
     )
     .setFooter({
@@ -136,7 +148,13 @@ const buildControlPanel = (settings, guild) => {
     new ButtonBuilder()
       .setCustomId('resetSettings')
       .setLabel('♻️ Reset Settings')
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
+
+    new ButtonBuilder()
+      .setCustomId('toggleIgnoreRole')
+      .setLabel('🙈 Ignore Role')
+      .setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
+
   );
 
   return { embed, buttons: [row1, row2] };
@@ -254,6 +272,24 @@ client.on(Events.InteractionCreate, async interaction => {
         ephemeral: true
       });
     }
+
+    if (interaction.commandName === "setignorerole") {
+      const role = interaction.options.getRole("role");
+
+      settings.ignoredRoleId = role.id;
+      settings.ignoreRoleEnabled = true;
+      await settings.save();
+
+      return interaction.reply({
+        embeds: [buildEmbedReply(
+          "✅ Ignored Role Set",
+          `Members with the role ${role} will now be ignored from VC and online alerts.`,
+          0x00ccff,
+          interaction.guild
+        )],
+        ephemeral: true
+      });
+    }
   }
 
   // Button interactions
@@ -305,6 +341,10 @@ client.on(Events.InteractionCreate, async interaction => {
           embeds: [cancelPanel.embed],
           components: cancelPanel.buttons
         });
+
+      case "toggleIgnoreRole":
+        settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
+        break;
     }
 
     await settings.save();
@@ -323,6 +363,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
   const settings = await GuildSettings.findOne({ guildId });
   if (!settings?.alertsEnabled || !settings.textChannelId) return;
+
+  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
+    const memberRoles = newState.member?.roles || oldState.member?.roles;
+    if (memberRoles?.cache.has(settings.ignoredRoleId)) return;
+  }
 
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
   if (!channel?.send) return;
@@ -360,6 +405,10 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
 
   const settings = await GuildSettings.findOne({ guildId: member.guild.id });
   if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
+
+  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
+    if (member.roles.cache.has(settings.ignoredRoleId)) return;
+  }
 
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
   if (!channel?.send) return;
