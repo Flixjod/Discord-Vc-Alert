@@ -406,7 +406,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     return;
   }
 
-  // Skip move events
+  // Ignore VC switch events (move between channels)
   if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
     return;
   }
@@ -429,7 +429,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user?.displayAvatarURL() ?? "" })
       .setTimestamp();
   } else {
-    return;
+    return; // Not a join/leave event or not enabled
   }
 
   const vc = newState.channel || oldState.channel;
@@ -438,6 +438,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const everyoneRole = vc.guild.roles.everyone;
   const isPrivateVC = !vc.permissionsFor(everyoneRole).has(PermissionsBitField.Flags.ViewChannel);
 
+  // 🔒 PRIVATE VC ALERT
   if (isPrivateVC && settings.privateThreadAlerts) {
     let thread = activeVCThreads.get(vc.id);
 
@@ -453,10 +454,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       });
 
       if (!thread) return;
-
       activeVCThreads.set(vc.id, thread);
 
-      // Clean up thread and map entry if autoDelete is enabled
       if (settings.autoDelete) {
         setTimeout(async () => {
           await thread.delete().catch(() => {});
@@ -465,19 +464,24 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       }
     }
 
-    const allowedMembers = vc.members.filter(m =>
+    // 💡 Add all members who can see the VC (not just those in VC)
+    const allowedMembers = vc.guild.members.cache.filter(m =>
       !m.user.bot &&
-      (!settings.ignoreRoleEnabled || !m.roles.cache.has(settings.ignoredRoleId)) &&
-      vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
+      vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel) &&
+      (!settings.ignoreRoleEnabled || !m.roles.cache.has(settings.ignoredRoleId))
     );
 
-    for (const [id] of allowedMembers) {
-      await thread.members.add(id).catch(() => {});
-    }
+    await Promise.all(
+      allowedMembers.map(m =>
+        thread.members.add(m.id).catch(() => {})
+      )
+    );
 
     const msg = await thread.send({ embeds: [embed] }).catch(() => {});
     if (!msg) console.warn(`[VC Alert] Failed to send embed in thread for ${vc.name}`);
-  } else if (!isPrivateVC) {
+
+  } else {
+    // 🌐 PUBLIC VC ALERT
     const msg = await logChannel.send({ embeds: [embed] }).catch(() => {});
     if (msg && settings.autoDelete) {
       setTimeout(() => msg.delete().catch(() => {}), 30_000);
