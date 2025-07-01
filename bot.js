@@ -417,7 +417,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   const settings = await GuildSettings.findOne({ guildId: member.guild.id });
   if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
 
-  if (settings.ignoreEnabled && settings.ignoreRoleId && member.roles.cache.has(settings.ignoreRoleId)) return;
+  if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member.roles.cache.has(settings.ignoredRoleId)) return;
 
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
   if (!channel?.send) return;
