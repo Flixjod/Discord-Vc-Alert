@@ -376,9 +376,10 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const logChannel = newState.guild.channels.cache.get(settings.channelId);
   if (!logChannel || !logChannel.isTextBased()) return;
 
-  const ignoredRole = settings.ignoredRoleId;
-  const member = newState.member || oldState.member;
-  if (ignoredRole && member.roles.cache.has(ignoredRole)) return;
+  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
+    const member = newState.member || oldState.member;
+    if (member?.roles.cache.has(settings.ignoredRoleId)) return;
+  }
 
   let embed;
 
