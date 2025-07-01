@@ -31,6 +31,7 @@ const guildSettingsSchema = new mongoose.Schema({
   joinAlerts: { type: Boolean, default: true },
   leaveAlerts: { type: Boolean, default: true },
   onlineAlerts: { type: Boolean, default: true },
+  privateThreadAlerts: { type: Boolean, default: true }, // NEW
   autoDelete: { type: Boolean, default: true },
   ignoredRoleId: { type: String, default: null }, // NEW
   ignoreRoleEnabled: { type: Boolean, default: false } // NEW
@@ -115,6 +116,7 @@ const buildControlPanel = (settings, guild) => {
       `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
+      `> 🔒 **Private Threads:** ${settings.privateThreadAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n` +
       `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅" : "❌"})` : "None"}\n\n` +
       `Use the buttons below to customize your settings on the fly! ⚙️`
@@ -144,6 +146,16 @@ const buildControlPanel = (settings, guild) => {
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
+      .setCustomId('toggleIgnoreRole')
+      .setLabel('🙈 Ignore Role')
+      .setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId('togglePrivateThreads')
+      .setLabel('🪪 Private Alerts')
+      .setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
       .setCustomId('toggleAutoDelete')
       .setLabel('🧹 Auto-Delete')
       .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
@@ -152,11 +164,6 @@ const buildControlPanel = (settings, guild) => {
       .setCustomId('resetSettings')
       .setLabel('♻️ Reset Settings')
       .setStyle(ButtonStyle.Danger),
-
-    new ButtonBuilder()
-      .setCustomId('toggleIgnoreRole')
-      .setLabel('🙈 Ignore Role')
-      .setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
 
   );
 
@@ -323,6 +330,9 @@ client.on(Events.InteractionCreate, async interaction => {
       case "toggleOnlineAlerts":
         settings.onlineAlerts = !settings.onlineAlerts;
         break;
+      case "togglePrivateThreads":
+        settings.privateThreadAlerts = !settings.privateThreadAlerts;
+        break;
       case "toggleAutoDelete":
         settings.autoDelete = !settings.autoDelete;
         break;
@@ -404,7 +414,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const vc = newState.channel || oldState.channel;
   const isPrivateVC = vc.permissionOverwrites?.size > 0;
 
-  if (isPrivateVC) {
+  if (isPrivateVC && settings.privateThreadAlerts) {
     const thread = await logChannel.threads.create({
       name: `🔊 VC Alert (${user.username})`,
       autoArchiveDuration: 60,
