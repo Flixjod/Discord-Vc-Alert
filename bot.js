@@ -380,7 +380,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const user = newState.member?.user || oldState.member?.user;
   if (!user || user.bot) return;
 
-  const settings = await getSettings(newState.guild.id);
+  const settings = await GuildSettings.findOne({ guildId: newState.guild.id });
   if (!settings || !settings.enabled || !settings.channelId) return;
 
   const logChannel = newState.guild.channels.cache.get(settings.channelId);
