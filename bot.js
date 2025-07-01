@@ -377,17 +377,20 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 // VC join/leave alert
+const activeVCThreads = new Map();
+
 client.on('voiceStateUpdate', async (oldState, newState) => {
   const user = newState.member?.user || oldState.member?.user;
   if (!user || user.bot) return;
 
-  const settings = await GuildSettings.findOne({ guildId: newState.guild.id });
+  const guild = newState.guild || oldState.guild;
+  const settings = await GuildSettings.findOne({ guildId: guild.id });
   if (!settings || !settings.alertsEnabled || !settings.textChannelId) return;
 
-  let logChannel = newState.guild.channels.cache.get(settings.textChannelId);
+  let logChannel = guild.channels.cache.get(settings.textChannelId);
   if (!logChannel || !logChannel.isTextBased()) {
     try {
-      logChannel = await newState.guild.channels.fetch(settings.textChannelId);
+      logChannel = await guild.channels.fetch(settings.textChannelId);
     } catch {
       return;
     }
@@ -395,7 +398,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 
   const member = newState.member || oldState.member;
-  if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member?.roles.cache.has(settings.ignoredRoleId)) {
+  if (
+    settings.ignoreRoleEnabled &&
+    settings.ignoredRoleId &&
+    member?.roles.cache.has(settings.ignoredRoleId)
+  ) {
     return;
   }
 
@@ -412,17 +419,17 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       .setColor(0x00ffcc)
       .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar })
       .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
-      .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
+      .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user?.displayAvatarURL() ?? "" })
       .setTimestamp();
   } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
     embed = new EmbedBuilder()
       .setColor(0xff5e5e)
       .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar })
       .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
-      .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
+      .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user?.displayAvatarURL() ?? "" })
       .setTimestamp();
   } else {
-    return; // Not a join/leave event or not enabled
+    return;
   }
 
   const vc = newState.channel || oldState.channel;
@@ -432,17 +439,31 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const isPrivateVC = !vc.permissionsFor(everyoneRole).has(PermissionsBitField.Flags.ViewChannel);
 
   if (isPrivateVC && settings.privateThreadAlerts) {
-    const thread = await logChannel.threads.create({
-      name: `🔊 VC Alert (${user.username})`,
-      autoArchiveDuration: 60,
-      type: ChannelType.PrivateThread,
-      reason: `Private VC alert for ${user.username}`,
-    }).catch(err => {
-      console.error("Failed to create thread:", err);
-      return null;
-    });
+    let thread = activeVCThreads.get(vc.id);
 
-    if (!thread) return;
+    if (!thread || thread.archived || !logChannel.threads.cache.has(thread.id)) {
+      thread = await logChannel.threads.create({
+        name: `🔊 VC Alert (${vc.name})`,
+        autoArchiveDuration: 60,
+        type: ChannelType.PrivateThread,
+        reason: `Private VC alert for ${vc.name}`,
+      }).catch(err => {
+        console.error("Failed to create thread:", err);
+        return null;
+      });
+
+      if (!thread) return;
+
+      activeVCThreads.set(vc.id, thread);
+
+      // Clean up thread and map entry if autoDelete is enabled
+      if (settings.autoDelete) {
+        setTimeout(async () => {
+          await thread.delete().catch(() => {});
+          activeVCThreads.delete(vc.id);
+        }, 30_000);
+      }
+    }
 
     const allowedMembers = vc.members.filter(m =>
       !m.user.bot &&
@@ -450,21 +471,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
     );
 
-    // Add VC members to thread before sending message
-    for (const [id, member] of allowedMembers) {
+    for (const [id] of allowedMembers) {
       await thread.members.add(id).catch(() => {});
     }
 
-    const msg = await thread.send({ embeds: [embed] }).catch(() => null);
-
-    if (msg && settings.autoDelete) {
-      setTimeout(async () => {
-        await msg.delete().catch(() => {});
-        await thread.delete().catch(() => {});
-      }, 30_000);
-    }
+    const msg = await thread.send({ embeds: [embed] }).catch(() => {});
+    if (!msg) console.warn(`[VC Alert] Failed to send embed in thread for ${vc.name}`);
   } else if (!isPrivateVC) {
-    const msg = await logChannel.send({ embeds: [embed] }).catch(() => null);
+    const msg = await logChannel.send({ embeds: [embed] }).catch(() => {});
     if (msg && settings.autoDelete) {
       setTimeout(() => msg.delete().catch(() => {}), 30_000);
     }
