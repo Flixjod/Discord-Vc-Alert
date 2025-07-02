@@ -146,20 +146,20 @@ const buildControlPanel = (settings, guild) => {
   );
 
   const row2 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
+    new ButtonBuilder()
       .setCustomId('togglePrivateThreads')
       .setLabel('🪪 Private Alerts')
       .setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
 
     new ButtonBuilder()
-      .setCustomId('toggleAutoDelete')
-      .setLabel('🧹 Auto-Delete')
-      .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-
-    new ButtonBuilder()
       .setCustomId('toggleIgnoreRole')
       .setLabel('🙈 Ignore Alerts')
       .setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId('toggleAutoDelete')
+      .setLabel('🧹 Auto-Delete')
+      .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
 
     new ButtonBuilder()
       .setCustomId('resetSettings')
