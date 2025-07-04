@@ -196,25 +196,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "vcstatus") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to use this command.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
       const panel = buildControlPanel(settings, guild);
       return interaction.reply({ embeds: [panel.embed], components: panel.buttons, ephemeral: true });
     }
 
     if (interaction.commandName === "vcon") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to enable VC alerts.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
       const selectedChannel = interaction.options.getChannel("channel");
       const savedChannel = settings.textChannelId
         ? await interaction.guild.channels.fetch(settings.textChannelId).catch(() => null)
@@ -275,13 +261,6 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === "vcoff") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to disable VC alerts.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
       if (!settings.alertsEnabled) {
         return interaction.reply({
           embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", 0xffcc00, guild)],
@@ -306,13 +285,6 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === "setignorerole") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to set the ignored role.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
       const role = interaction.options.getRole("role");
 
       settings.ignoredRoleId = role.id;
@@ -331,13 +303,6 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === "resetignorerole") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to reset the ignored role.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
       settings.ignoredRoleId = null;
       settings.ignoreRoleEnabled = false;
       await settings.save();
@@ -356,13 +321,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
   // Button interactions
   if (interaction.isButton()) {
-    if (!hasAdminPermission(interaction)) {
-      return interaction.reply({
-        embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to use these controls.", 0xff4444, guild)],
-        ephemeral: true
-      });
-    }
-
     switch (interaction.customId) {
       case "toggleLeaveAlerts":
         settings.leaveAlerts = !settings.leaveAlerts;
@@ -507,16 +465,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 
     // 💡 Add all members who can see the VC (not just those in VC)
-    const allMembers = await vc.guild.members.fetch();
-
-    const allowedMembers = allMembers.filter(member =>
-      !member.user.bot &&
-      vc.permissionsFor(member).has(PermissionsBitField.Flags.ViewChannel)
+    const allowedMembers = vc.guild.members.cache.filter(m =>
+      !m.user.bot &&
+      vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel) &&
+      (!settings.ignoreRoleEnabled || !m.roles.cache.has(settings.ignoredRoleId))
     );
 
     await Promise.all(
-      allowedMembers.map(member =>
-        thread.members.add(member.id).catch(() => {}) // Silently handle any add failures
+      allowedMembers.map(m =>
+        thread.members.add(m.id).catch(() => {})
       )
     );
 
@@ -542,28 +499,27 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   const settings = await GuildSettings.findOne({ guildId: member.guild.id });
   if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
 
+  // Ignore if member has the ignored role
   if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
     const freshMember = await member.guild.members.fetch(member.id).catch(() => null);
     if (freshMember?.roles.cache.has(settings.ignoredRoleId)) return;
   }
 
   const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
-  if (!channel?.send) return;
+  if (!channel || !channel.isTextBased()) return;
 
   const embed = new EmbedBuilder()
-    .setColor(0x55ff55)
-    .setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
-    .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
-    .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
+    .setColor(0x3498db)
+    .setAuthor({ name: `${member.user.username} is online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
+    .setDescription(`**${member.user.username}** just came online. Time to vibe! 💻🎧`)
+    .setFooter({ text: "🟢 Presence Alert", iconURL: client.user?.displayAvatarURL() ?? "" })
     .setTimestamp();
 
-  const msg = await channel.send({ embeds: [embed] }).catch(() => null);
-  if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
+  const msg = await channel.send({ embeds: [embed] }).catch(() => {});
+  if (msg && settings.autoDelete) {
+    setTimeout(() => msg.delete().catch(() => {}), 30_000);
+  }
 });
 
-
-function hasAdminPermission(interaction) {
-  return interaction.memberPermissions.has(PermissionsBitField.Flags.ManageGuild);
-}
 
 client.login(process.env.TOKEN).catch(err => console.error("❌ Login failed:", err));
