@@ -509,10 +509,10 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (!channel || !channel.isTextBased()) return;
 
   const embed = new EmbedBuilder()
-    .setColor(0x3498db)
-    .setAuthor({ name: `${member.user.username} is online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
-    .setDescription(`**${member.user.username}** just came online. Time to vibe! 💻🎧`)
-    .setFooter({ text: "🟢 Presence Alert", iconURL: client.user?.displayAvatarURL() ?? "" })
+    .setColor(0x55ff55)
+    .setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
+    .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
+    .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
     .setTimestamp();
 
   const msg = await channel.send({ embeds: [embed] }).catch(() => {});
