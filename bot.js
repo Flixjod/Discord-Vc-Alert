@@ -507,15 +507,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 
     // 💡 Add all members who can see the VC (not just those in VC)
-    const allowedMembers = vc.guild.members.cache.filter(m =>
-      !m.user.bot &&
-      vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel) &&
-      (!settings.ignoreRoleEnabled || !m.roles.cache.has(settings.ignoredRoleId))
+    const allMembers = await vc.guild.members.fetch();
+    const allowedMembers = allMembers.filter(member =>
+      !member.user.bot &&
+      vc.permissionsFor(member).has(PermissionsBitField.Flags.ViewChannel)
     );
 
     await Promise.all(
-      allowedMembers.map(m =>
-        thread.members.add(m.id).catch(() => {})
+      allowedMembers.map(member =>
+        thread.members.add(member.id).catch(() => {}) // Silently handle any add failures
       )
     );
 
