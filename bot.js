@@ -117,9 +117,9 @@ const buildControlPanel = (settings, guild) => {
       `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🔒 **Private Alerts:** ${settings.privateThreadAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n` +
-      `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅" : "❌"})` : "None"}\n\n` +
+      `> 🪪 **Private Alerts:** ${settings.privateThreadAlerts ? "✅ On" : "❌ Off"}\n` +
+      `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅" : "❌"})` : "None"}\n` +
+      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
       `Use the buttons below to customize your settings on the fly! ⚙️`
     )
     .setFooter({
