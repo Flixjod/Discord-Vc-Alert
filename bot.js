@@ -1,18 +1,18 @@
 const express = require("express");
 const {
-  Client,
-  GatewayIntentBits,
-  PermissionsBitField,
-  Partials,
-  EmbedBuilder,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  ChannelType,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  Events
+    Client,
+    GatewayIntentBits,
+    PermissionsBitField,
+    Partials,
+    EmbedBuilder,
+    REST,
+    Routes,
+    SlashCommandBuilder,
+    ChannelType,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    Events
 } = require("discord.js");
 const mongoose = require("mongoose");
 
@@ -26,546 +26,599 @@ app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
 // MongoDB schema
 const guildSettingsSchema = new mongoose.Schema({
-  guildId: { type: String, required: true, unique: true },
-  alertsEnabled: { type: Boolean, default: false },
-  textChannelId: { type: String, default: null },
-  joinAlerts: { type: Boolean, default: true },
-  leaveAlerts: { type: Boolean, default: true },
-  onlineAlerts: { type: Boolean, default: true },
-  privateThreadAlerts: { type: Boolean, default: true }, // NEW
-  autoDelete: { type: Boolean, default: true },
-  ignoredRoleId: { type: String, default: null }, // NEW
-  ignoreRoleEnabled: { type: Boolean, default: false } // NEW
+    guildId: { type: String, required: true, unique: true },
+    alertsEnabled: { type: Boolean, default: false },
+    textChannelId: { type: String, default: null },
+    joinAlerts: { type: Boolean, default: true },
+    leaveAlerts: { type: Boolean, default: true },
+    onlineAlerts: { type: Boolean, default: true },
+    privateThreadAlerts: { type: Boolean, default: true },
+    autoDelete: { type: Boolean, default: true }, // Auto-delete individual messages (30s)
+    ignoredRoleId: { type: String, default: null },
+    ignoreRoleEnabled: { type: Boolean, default: false }
 });
 const GuildSettings = mongoose.model("guildsettings", guildSettingsSchema);
 
+// In-memory cache for guild settings to reduce DB reads
+const guildSettingsCache = new Map();
+
+// Helper to get guild settings, using cache first
+async function getGuildSettings(guildId) {
+    if (guildSettingsCache.has(guildId)) {
+        return guildSettingsCache.get(guildId);
+    }
+    let settings = await GuildSettings.findOne({ guildId });
+    if (!settings) {
+        settings = new GuildSettings({ guildId });
+        await settings.save(); // Save default settings if not found
+    }
+    guildSettingsCache.set(guildId, settings); // Cache the settings
+    return settings;
+}
+
+// Helper to update and cache guild settings
+async function updateGuildSettings(settings) {
+    await settings.save();
+    guildSettingsCache.set(settings.guildId, settings); // Update cache
+}
+
 // Connect MongoDB
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ Connected to MongoDB"))
-  .catch(err => {
-    console.error("❌ MongoDB error:", err.message);
-    process.exit(1);
-  });
+    .then(() => console.log("✅ Connected to MongoDB"))
+    .catch(err => {
+        console.error("❌ MongoDB error:", err.message);
+        process.exit(1);
+    });
 
 // Discord client
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences
-  ],
-  partials: [Partials.User, Partials.GuildMember]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildPresences
+    ],
+    partials: [Partials.User, Partials.GuildMember]
 });
 
 // Slash commands
 const commands = [
-  new SlashCommandBuilder()
-    .setName("vcstatus")
-    .setDescription("📡 View and control VC/online alerts."),
-  new SlashCommandBuilder()
-    .setName("vcon")
-    .setDescription("🚀 Enable voice join/leave alerts.")
-    .addChannelOption(option =>
-      option.setName("channel")
-        .setDescription("Channel for VC alerts")
-        .addChannelTypes(ChannelType.GuildText)
-        .setRequired(false)
-    ),
-  new SlashCommandBuilder()
-    .setName("vcoff")
-    .setDescription("🛑 Disable all alerts."),
-  new SlashCommandBuilder()
-  .setName("setignorerole")
-  .setDescription("🙈 Set a role to be ignored from VC/online alerts")
-  .addRoleOption(option =>
-    option.setName("role")
-      .setDescription("The role to ignore from alerts")
-      .setRequired(true)
-  ),
-  new SlashCommandBuilder()
-    .setName("resetignorerole")
-    .setDescription("♻️ Reset the ignored role")
+    new SlashCommandBuilder()
+        .setName("vcstatus")
+        .setDescription("📡 View and control VC/online alerts."),
+    new SlashCommandBuilder()
+        .setName("vcon")
+        .setDescription("🚀 Enable voice join/leave alerts.")
+        .addChannelOption(option =>
+            option.setName("channel")
+                .setDescription("Channel for VC alerts")
+                .addChannelTypes(ChannelType.GuildText)
+                .setRequired(false)
+        ),
+    new SlashCommandBuilder()
+        .setName("vcoff")
+        .setDescription("🛑 Disable all alerts."),
+    new SlashCommandBuilder()
+        .setName("setignorerole")
+        .setDescription("🙈 Set a role to be ignored from VC/online alerts")
+        .addRoleOption(option =>
+            option.setName("role")
+                .setDescription("The role to ignore from alerts")
+                .setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName("resetignorerole")
+        .setDescription("♻️ Reset the ignored role")
 
 ].map(cmd => cmd.toJSON());
 
 client.once("ready", async () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
-  
-  client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" });
-  
-  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-  try {
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("✅ Slash commands registered.");
-  } catch (err) {
-    console.error("❌ Command registration error:", err);
-  }
+    console.log(`🤖 Logged in as ${client.user.tag}`);
+
+    client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" });
+
+    const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+    try {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log("✅ Slash commands registered.");
+    } catch (err) {
+        console.error("❌ Command registration error:", err);
+    }
 });
 
+// Define Embed Colors for consistency and readability
+const EmbedColors = {
+    SUCCESS: 0x1abc9c,     // Green
+    ERROR: 0xe74c3c,       // Red
+    WARNING: 0xffcc00,     // Yellow
+    INFO: 0x5865f2,        // Discord Blue
+    VC_JOIN: 0x00ffcc,     // Bright Cyan
+    VC_LEAVE: 0xff5e5e,    // Light Red
+    ONLINE: 0x55ff55,      // Light Green
+    RESET: 0x00ccff        // Light Blue
+};
+
 const buildControlPanel = (settings, guild) => {
-  const embed = new EmbedBuilder()
-    .setColor(settings.alertsEnabled ? 0x1abc9c : 0xe74c3c)
-    .setAuthor({
-      name: "🎛️ VC Alert Control Panel",
-      iconURL: client.user.displayAvatarURL()
-    })
-    .setDescription(
-      `**Your Central Hub for Voice Chat Alerts!** ✨\n\n` +
-      `> 📢 **Alerts Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set — *assign one below!*"}\n` +
-      `> 🔔 **Status:** ${settings.alertsEnabled ? "🟢 **Active!** (All systems go)" : "🔴 **Disabled** (Peace & quiet)"}\n` +
-      `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🪪 **Private Alerts:** ${settings.privateThreadAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅ Active" : "❌ Inactive"})` : "None set"}\n` +
-      `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
-      `*Use the buttons below to fine-tune your settings instantly!* ⚙️`
-    )
-    .setFooter({
-      text: guild?.name || `Server ID: ${settings.guildId}`,
-      iconURL: guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
-    })
-    .setTimestamp();
+    const embed = new EmbedBuilder()
+        .setColor(settings.alertsEnabled ? EmbedColors.SUCCESS : EmbedColors.ERROR)
+        .setAuthor({
+            name: "🎛️ VC Alert Control Panel",
+            iconURL: client.user.displayAvatarURL()
+        })
+        .setDescription(
+            `**Your Central Hub for Voice Chat Alerts!** ✨\n\n` +
+            `> 📢 **Alerts Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set — *assign one below!*"}\n` +
+            `> 🔔 **Status:** ${settings.alertsEnabled ? "🟢 **Active!** (All systems go)" : "🔴 **Disabled** (Peace & quiet)"}\n` +
+            `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
+            `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
+            `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
+            `> 🪪 **Private Alerts:** ${settings.privateThreadAlerts ? "✅ On" : "❌ Off"}\n` +
+            `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅ Active" : "❌ Inactive"})` : "None set"}\n` +
+            `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
+            `*Use the buttons below to fine-tune your settings instantly!* ⚙️`
+        )
+        .setFooter({
+            text: guild?.name || `Server ID: ${settings.guildId}`,
+            iconURL: guild?.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
+        })
+        .setTimestamp();
 
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('toggleJoinAlerts')
-      .setLabel('👋 Join')
-      .setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('toggleJoinAlerts')
+            .setLabel('👋 Join')
+            .setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
 
-    new ButtonBuilder()
-      .setCustomId('toggleLeaveAlerts')
-      .setLabel('🏃‍♂️ Leave')
-      .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId('toggleLeaveAlerts')
+            .setLabel('🏃‍♂️ Leave')
+            .setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
 
-    new ButtonBuilder()
-      .setCustomId('toggleOnlineAlerts')
-      .setLabel('🟢 Online')
-      .setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
-  );
+        new ButtonBuilder()
+            .setCustomId('toggleOnlineAlerts')
+            .setLabel('🟢 Online')
+            .setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    );
 
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('togglePrivateThreads')
-      .setLabel('🪪 Private Alerts')
-      .setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
+    const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('togglePrivateThreads')
+            .setLabel('🪪 Private Alerts')
+            .setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
 
-    new ButtonBuilder()
-      .setCustomId('toggleIgnoreRole')
-      .setLabel('🙈 Ignore Alerts')
-      .setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId('toggleIgnoreRole')
+            .setLabel('🙈 Ignore Alerts')
+            .setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
 
-    new ButtonBuilder()
-      .setCustomId('toggleAutoDelete')
-      .setLabel('🧹 Auto-Delete')
-      .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId('toggleAutoDelete')
+            .setLabel('🧹 Auto-Delete')
+            .setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
 
-    new ButtonBuilder()
-      .setCustomId('resetSettings')
-      .setLabel('♻️ Reset Settings')
-      .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+            .setCustomId('resetSettings')
+            .setLabel('♻️ Reset Settings')
+            .setStyle(ButtonStyle.Danger),
+    );
 
-  );
-
-  return { embed, buttons: [row1, row2] };
+    return { embed, buttons: [row1, row2] };
 };
 
 function buildEmbedReply(title, description, color, guild) {
-  return new EmbedBuilder()
-    .setColor(color || 0x5865f2)
-    .setAuthor({ name: title, iconURL: client.user?.displayAvatarURL() || "" })
-    .setDescription(description)
-    .setFooter({
-      text: "VC Alert Control Panel",
-      iconURL: guild.iconURL({ dynamic: true }) || client.user.displayAvatarURL()})
-    .setTimestamp();
+    return new EmbedBuilder()
+        .setColor(color || EmbedColors.INFO)
+        .setAuthor({ name: title, iconURL: client.user.displayAvatarURL() })
+        .setDescription(description)
+        .setFooter({
+            text: "VC Alert Control Panel",
+            iconURL: guild.iconURL({ dynamic: true }) || client.user.displayAvatarURL()
+        })
+        .setTimestamp();
 }
 
 client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.inGuild()) return;
+    if (!interaction.inGuild()) return;
 
-  const guild = interaction.guild;
-  const guildId = guild.id;
+    const guild = interaction.guild;
+    const guildId = guild.id;
 
-  let settings = await GuildSettings.findOne({ guildId });
-  if (!settings) {
-    settings = new GuildSettings({ guildId });
-    await settings.save();
-  }
+    let settings = await getGuildSettings(guildId);
 
-  if (interaction.isChatInputCommand()) {
-    if (interaction.commandName === "vcstatus") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to use this command.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
+    if (interaction.isChatInputCommand()) {
+        if (!hasAdminPermission(interaction)) {
+            return interaction.reply({
+                embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to use this command.", EmbedColors.ERROR, guild)],
+                ephemeral: true
+            });
+        }
 
-      const panel = buildControlPanel(settings, guild);
-      return interaction.reply({ embeds: [panel.embed], components: panel.buttons, ephemeral: true });
+        if (interaction.commandName === "vcstatus") {
+            const panel = buildControlPanel(settings, guild);
+            return interaction.reply({ embeds: [panel.embed], components: panel.buttons, ephemeral: true });
+        }
+
+        if (interaction.commandName === "vcon") {
+            const selectedChannel = interaction.options.getChannel("channel");
+            let channel = null;
+
+            if (selectedChannel) {
+                channel = selectedChannel;
+            } else if (settings.textChannelId) {
+                channel = guild.channels.cache.get(settings.textChannelId);
+                if (!channel) {
+                    channel = await guild.channels.fetch(settings.textChannelId).catch(() => null);
+                }
+            } else {
+                channel = interaction.channel;
+            }
+
+            if (!channel || channel.type !== ChannelType.GuildText) {
+                return interaction.reply({
+                    embeds: [buildEmbedReply(
+                        "❌ Channel Missing",
+                        `Hmm... I couldn't find a valid text channel to send alerts to.\n\nTry using:\n• \`/vcon #your-channel\` to specify one\n• Or make sure the saved one still exists.`,
+                        EmbedColors.ERROR,
+                        guild
+                    )],
+                    ephemeral: true
+                });
+            }
+
+            const permissions = channel.permissionsFor(client.user);
+            if (!permissions?.has("ViewChannel") || !permissions.has("SendMessages")) {
+                return interaction.reply({
+                    embeds: [buildEmbedReply(
+                        "🚫 No Permission",
+                        `I can’t post in <#${channel.id}>. Please make sure I have **View Channel** and **Send Messages** permission there.`,
+                        EmbedColors.ERROR,
+                        guild
+                    )],
+                    ephemeral: true
+                });
+            }
+
+            if (settings.alertsEnabled && settings.textChannelId === channel.id) {
+                return interaction.reply({
+                    embeds: [buildEmbedReply(
+                        "⚠️ Already On",
+                        `VC alerts are **already active** in <#${channel.id}> 🔊\n\nUse \`/vcstatus\` to manage join, leave, and online alerts. Or change the channel with \`/vcon #new-channel\`.`,
+                        EmbedColors.WARNING,
+                        guild
+                    )],
+                    ephemeral: true
+                });
+            }
+
+            settings.alertsEnabled = true;
+            settings.textChannelId = channel.id;
+            await updateGuildSettings(settings);
+
+            return interaction.reply({
+                embeds: [buildEmbedReply(
+                    "✅ VC Alerts Enabled",
+                    `You're all set! I’ll now post voice activity in <#${channel.id}> 🎙️\n\nUse \`/vcstatus\` anytime to tweak the vibe — join, leave, and online alerts are all customizable. ✨`,
+                    EmbedColors.SUCCESS,
+                    guild
+                )],
+                ephemeral: true
+            });
+        }
+
+        if (interaction.commandName === "vcoff") {
+            if (!settings.alertsEnabled) {
+                return interaction.reply({
+                    embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", EmbedColors.WARNING, guild)],
+                    ephemeral: true
+                });
+            }
+
+            settings.alertsEnabled = false;
+            await updateGuildSettings(settings);
+
+            return interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(EmbedColors.ERROR)
+                        .setAuthor({ name: "VC Alerts Powered Down 🔕", iconURL: client.user.displayAvatarURL() })
+                        .setDescription("🚫 No more **join**, **leave**, or **online** alerts.\nUse `/vcon` to re-enable anytime!")
+                        .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
+                        .setTimestamp()
+                ],
+                ephemeral: true
+            });
+        }
+
+        if (interaction.commandName === "setignorerole") {
+            const role = interaction.options.getRole("role");
+
+            settings.ignoredRoleId = role.id;
+            settings.ignoreRoleEnabled = true;
+            await updateGuildSettings(settings);
+
+            return interaction.reply({
+                embeds: [buildEmbedReply(
+                    "✅ Ignored Role Set",
+                    `Members with the role ${role} will now be ignored from VC and online alerts.`,
+                    EmbedColors.RESET,
+                    interaction.guild
+                )],
+                ephemeral: true
+            });
+        }
+
+        if (interaction.commandName === "resetignorerole") {
+            settings.ignoredRoleId = null;
+            settings.ignoreRoleEnabled = false;
+            await updateGuildSettings(settings);
+
+            return interaction.reply({
+                embeds: [buildEmbedReply(
+                    "♻️ Ignored Role Reset",
+                    "The ignored role has been removed. All members will now be included in alerts.",
+                    EmbedColors.RESET,
+                    interaction.guild
+                )],
+                ephemeral: true
+            });
+        }
     }
 
-    if (interaction.commandName === "vcon") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to enable VC alerts.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
+    if (interaction.isButton()) {
+        if (!hasAdminPermission(interaction)) {
+            return interaction.reply({
+                embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to use these controls.", EmbedColors.ERROR, guild)],
+                ephemeral: true
+            });
+        }
 
-      const selectedChannel = interaction.options.getChannel("channel");
-      const savedChannel = settings.textChannelId
-        ? await interaction.guild.channels.fetch(settings.textChannelId).catch(() => null)
-        : null;
+        switch (interaction.customId) {
+            case "toggleLeaveAlerts":
+                settings.leaveAlerts = !settings.leaveAlerts;
+                break;
+            case "toggleJoinAlerts":
+                settings.joinAlerts = !settings.joinAlerts;
+                break;
+            case "toggleOnlineAlerts":
+                settings.onlineAlerts = !settings.onlineAlerts;
+                break;
+            case "togglePrivateThreads":
+                settings.privateThreadAlerts = !settings.privateThreadAlerts;
+                break;
+            case "toggleAutoDelete":
+                settings.autoDelete = !settings.autoDelete;
+                break;
+            case "toggleIgnoreRole":
+                settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
+                break;
+            case "resetSettings":
+                const confirmRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
+                );
 
-      const channel = selectedChannel || savedChannel || interaction.channel;
+                return interaction.update({
+                    embeds: [buildEmbedReply("⚠️ Confirm Settings Reset", "Are you sure you want to reset all VC alert settings to default?", EmbedColors.WARNING, interaction.guild)],
+                    components: [confirmRow]
+                });
 
-      if (!channel || channel.type !== ChannelType.GuildText) {
-        return interaction.reply({
-          embeds: [buildEmbedReply(
-            "❌ Channel Missing",
-            `Hmm... I couldn't find a valid text channel to send alerts to.\n\nTry using:</br>• \`/vcon #your-channel\` to specify one\n• Or make sure the saved one still exists.`,
-            0xff4444,
-            guild
-          )],
-          ephemeral: true
-        });
-      }
+            case "confirmReset":
+                await GuildSettings.deleteOne({ guildId });
+                guildSettingsCache.delete(guildId);
 
-      const permissions = channel.permissionsFor(client.user);
-      if (!permissions?.has("ViewChannel") || !permissions.has("SendMessages")) {
-        return interaction.reply({
-          embeds: [buildEmbedReply(
-            "🚫 No Permission",
-            `I can’t post in <#${channel.id}>. Please make sure I have **View Channel** and **Send Messages** permission there.`,
-            0xff4444,
-            guild
-          )],
-          ephemeral: true
-        });
-      }
+                settings = await getGuildSettings(guildId);
 
-      if (settings.alertsEnabled && settings.textChannelId === channel.id) {
-        return interaction.reply({
-          embeds: [buildEmbedReply(
-            "⚠️ Already On",
-            `VC alerts are **already active** in <#${channel.id}> 🔊\n\nUse \`/vcstatus\` to manage join, leave, and online alerts. Or change the channel with \`/vcon #new-channel\`.`,
-            0xffcc00,
-            guild
-          )],
-          ephemeral: true
-        });
-      }
+                await interaction.followUp({
+                    embeds: [buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", EmbedColors.RESET, guild)],
+                    ephemeral: true
+                });
 
-      settings.alertsEnabled = true;
-      settings.textChannelId = channel.id;
-      await settings.save();
+                const newPanel = buildControlPanel(settings, guild);
+                return interaction.message.edit({ embeds: [newPanel.embed], components: newPanel.buttons });
 
-      return interaction.reply({
-        embeds: [buildEmbedReply(
-          "✅ VC Alerts Enabled",
-          `You're all set! I’ll now post voice activity in <#${channel.id}> 🎙️\n\nUse \`/vcstatus\` anytime to tweak the vibe — join, leave, and online alerts are all customizable. ✨`,
-          0x00ff88,
-          guild
-        )],
-        ephemeral: true
-      });
+
+            case "cancelReset":
+                const cancelPanel = buildControlPanel(settings, guild);
+                return interaction.update({
+                    embeds: [cancelPanel.embed],
+                    components: cancelPanel.buttons
+                });
+        }
+
+        await updateGuildSettings(settings);
+        const updatedPanel = buildControlPanel(settings, guild);
+        return interaction.update({ embeds: [updatedPanel.embed], components: updatedPanel.buttons });
     }
-
-    if (interaction.commandName === "vcoff") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to disable VC alerts.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
-      if (!settings.alertsEnabled) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", 0xffcc00, guild)],
-          ephemeral: true
-        });
-      }
-
-      settings.alertsEnabled = false;
-      await settings.save();
-
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xff4444)
-            .setAuthor({ name: "VC Alerts Powered Down 🔕", iconURL: client.user.displayAvatarURL() })
-            .setDescription("🚫 No more **join**, **leave**, or **online** alerts.\nUse `/vcon` to re-enable anytime!")
-            .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
-            .setTimestamp()
-        ],
-        ephemeral: true
-      });
-    }
-
-    if (interaction.commandName === "setignorerole") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to set the ignored role.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
-      const role = interaction.options.getRole("role");
-
-      settings.ignoredRoleId = role.id;
-      settings.ignoreRoleEnabled = true;
-      await settings.save();
-
-      return interaction.reply({
-        embeds: [buildEmbedReply(
-          "✅ Ignored Role Set",
-          `Members with the role ${role} will now be ignored from VC and online alerts.`,
-          0x00ccff,
-          interaction.guild
-        )],
-        ephemeral: true
-      });
-    }
-
-    if (interaction.commandName === "resetignorerole") {
-      if (!hasAdminPermission(interaction)) {
-        return interaction.reply({
-          embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to reset the ignored role.", 0xff4444, guild)],
-          ephemeral: true
-        });
-      }
-
-      settings.ignoredRoleId = null;
-      settings.ignoreRoleEnabled = false;
-      await settings.save();
-
-      return interaction.reply({
-        embeds: [buildEmbedReply(
-          "♻️ Ignored Role Reset",
-          "The ignored role has been removed. All members will now be included in alerts.",
-          0x00ccff,
-          interaction.guild
-        )],
-        ephemeral: true
-      });
-    }
-  }
-
-  // Button interactions
-  if (interaction.isButton()) {
-    if (!hasAdminPermission(interaction)) {
-      return interaction.reply({
-        embeds: [buildEmbedReply("🚫 No Permission", "You need **Manage Server** permission to use these controls.", 0xff4444, guild)],
-        ephemeral: true
-      });
-    }
-
-    switch (interaction.customId) {
-      case "toggleLeaveAlerts":
-        settings.leaveAlerts = !settings.leaveAlerts;
-        break;
-      case "toggleJoinAlerts":
-        settings.joinAlerts = !settings.joinAlerts;
-        break;
-      case "toggleOnlineAlerts":
-        settings.onlineAlerts = !settings.onlineAlerts;
-        break;
-      case "togglePrivateThreads":
-        settings.privateThreadAlerts = !settings.privateThreadAlerts;
-        break;
-      case "toggleAutoDelete":
-        settings.autoDelete = !settings.autoDelete;
-        break;
-      case "resetSettings":
-        const confirmRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Confirm Reset").setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
-        );
-
-        return interaction.update({
-          embeds: [buildEmbedReply("⚠️ Confirm Settings Reset", "Are you sure you want to reset all VC alert settings to default?", 0xffcc00, interaction.guild)],
-          components: [confirmRow]
-        });
-
-      case "confirmReset":
-        await GuildSettings.deleteOne({ guildId });
-        settings = new GuildSettings({ guildId });
-        await settings.save(); // ✅ Save the reset settings
-
-        const newPanel = buildControlPanel(settings, guild);
-        return interaction.update({ embeds: [buildEmbedReply("✅ Settings Reset", "All settings have been restored to default. 🎯", 0x00ccff, guild), newPanel.embed], components: newPanel.buttons });
-
-
-      case "cancelReset":
-        const cancelPanel = buildControlPanel(settings, guild);
-        return interaction.update({
-          embeds: [cancelPanel.embed],
-          components: cancelPanel.buttons
-        });
-
-      case "toggleIgnoreRole":
-        settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
-        break;
-    }
-
-    await settings.save();
-    const updatedPanel = buildControlPanel(settings, guild);
-    return interaction.update({ embeds: [updatedPanel.embed], components: updatedPanel.buttons });
-
-  }
 });
+
+// Map to store active thread objects, keyed by VC ID
+const activeVCThreads = new Map();
+// Map to store thread deletion timeouts, keyed by VC ID
+const threadDeletionTimeouts = new Map();
 
 // VC join/leave alert
-const activeVCThreads = new Map();
-
 client.on('voiceStateUpdate', async (oldState, newState) => {
-  const user = newState.member?.user || oldState.member?.user;
-  if (!user || user.bot) return;
+    const user = newState.member?.user || oldState.member?.user;
+    if (!user || user.bot) return;
 
-  const guild = newState.guild || oldState.guild;
-  const settings = await GuildSettings.findOne({ guildId: guild.id });
-  if (!settings || !settings.alertsEnabled || !settings.textChannelId) return;
+    const guild = newState.guild || oldState.guild;
+    const settings = await getGuildSettings(guild.id);
+    if (!settings || !settings.alertsEnabled || !settings.textChannelId) return;
 
-  let logChannel = guild.channels.cache.get(settings.textChannelId);
-  if (!logChannel || !logChannel.isTextBased()) {
-    try {
-      logChannel = await guild.channels.fetch(settings.textChannelId);
-    } catch {
-      return;
-    }
-    if (!logChannel?.isTextBased()) return;
-  }
-
-  const member = newState.member || oldState.member;
-  if (
-    settings.ignoreRoleEnabled &&
-    settings.ignoredRoleId &&
-    member?.roles.cache.has(settings.ignoredRoleId)
-  ) {
-    return;
-  }
-
-  // Ignore VC switch events (move between channels)
-  if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
-    return;
-  }
-
-  const avatar = user.displayAvatarURL({ dynamic: true });
-  let embed;
-
-  if (!oldState.channel && newState.channel && settings.joinAlerts) {
-    embed = new EmbedBuilder()
-      .setColor(0x00ffcc)
-      .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar })
-      .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
-      .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user?.displayAvatarURL() ?? "" })
-      .setTimestamp();
-  } else if (oldState.channel && !newState.channel && settings.leaveAlerts) {
-    embed = new EmbedBuilder()
-      .setColor(0xff5e5e)
-      .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar })
-      .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
-      .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user?.displayAvatarURL() ?? "" })
-      .setTimestamp();
-  } else {
-    return; // Not a join/leave event or not enabled
-  }
-
-  const vc = newState.channel || oldState.channel;
-  if (!vc) return;
-
-  const everyoneRole = vc.guild.roles.everyone;
-  const isPrivateVC = !vc.permissionsFor(everyoneRole).has(PermissionsBitField.Flags.ViewChannel);
-
-  // 🔒 PRIVATE VC ALERT
-  if (isPrivateVC && settings.privateThreadAlerts) {
-    let thread = activeVCThreads.get(vc.id);
-
-    if (!thread || thread.archived || !logChannel.threads.cache.has(thread.id)) {
-      thread = await logChannel.threads.create({
-        name: `🔊 VC Alert (${vc.name})`,
-        autoArchiveDuration: 60,
-        type: ChannelType.PrivateThread,
-        reason: `Private VC alert for ${vc.name}`,
-      }).catch(err => {
-        console.error("Failed to create thread:", err);
-        return null;
-      });
-
-      if (!thread) return;
-      activeVCThreads.set(vc.id, thread);
-
-      if (settings.autoDelete) {
-        setTimeout(async () => {
-          await thread.delete().catch(() => {});
-          activeVCThreads.delete(vc.id);
-        }, 30_000);
-      }
+    const member = newState.member || oldState.member;
+    if (
+        settings.ignoreRoleEnabled &&
+        settings.ignoredRoleId &&
+        member?.roles.cache.has(settings.ignoredRoleId)
+    ) {
+        return;
     }
 
-    // 💡 Add all members who can see the VC (not just those in VC)
-    const allMembers = await vc.guild.members.fetch();
-    const allowedMembers = allMembers.filter(member =>
-      !member.user.bot &&
-      vc.permissionsFor(member).has(PermissionsBitField.Flags.ViewChannel)
-    );
-
-    await Promise.all(
-      allowedMembers.map(member =>
-        thread.members.add(member.id).catch(() => {}) // Silently handle any add failures
-      )
-    );
-
-    const msg = await thread.send({ embeds: [embed] }).catch(() => {});
-    if (!msg) console.warn(`[VC Alert] Failed to send embed in thread for ${vc.name}`);
-
-  } else {
-    // 🌐 PUBLIC VC ALERT
-    const msg = await logChannel.send({ embeds: [embed] }).catch(() => {});
-    if (msg && settings.autoDelete) {
-      setTimeout(() => msg.delete().catch(() => {}), 30_000);
+    // Ignore VC switch events (move between channels) - only process actual joins/leaves
+    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+        return;
     }
-  }
+
+    let logChannel = guild.channels.cache.get(settings.textChannelId);
+    if (!logChannel || !logChannel.isTextBased()) {
+        try {
+            logChannel = await guild.channels.fetch(settings.textChannelId);
+        } catch (e) {
+            console.error(`[VC Alert] Failed to fetch log channel ${settings.textChannelId} for guild ${guild.id}:`, e.message);
+            return;
+        }
+        if (!logChannel?.isTextBased()) return;
+    }
+
+    const avatar = user.displayAvatarURL({ dynamic: true });
+    let embed;
+
+    if (!oldState.channelId && newState.channelId && settings.joinAlerts) { // User joined a VC
+        embed = new EmbedBuilder()
+            .setColor(EmbedColors.VC_JOIN)
+            .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar })
+            .setDescription(`🎧 **${user.username}** joined **${newState.channel.name}** — Let the vibes begin!`)
+            .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
+            .setTimestamp();
+    } else if (oldState.channelId && !newState.channelId && settings.leaveAlerts) { // User left a VC
+        embed = new EmbedBuilder()
+            .setColor(EmbedColors.VC_LEAVE)
+            .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar })
+            .setDescription(`👋 **${user.username}** left **${oldState.channel.name}** — See ya next time!`)
+            .setFooter({ text: "💨 Gone but not forgotten.", iconURL: client.user.displayAvatarURL() })
+            .setTimestamp();
+    } else {
+        return; // Not a relevant join/leave event or not enabled
+    }
+
+    const vc = newState.channel || oldState.channel;
+    if (!vc) return;
+
+    const everyoneRole = vc.guild.roles.everyone;
+    // Determine if it's a "private" VC (i.e., @everyone cannot view)
+    const isPrivateVC = !vc.permissionsFor(everyoneRole).has(PermissionsBitField.Flags.ViewChannel);
+
+    // Private VC Alert Logic
+    if (isPrivateVC && settings.privateThreadAlerts) {
+        let thread = activeVCThreads.get(vc.id);
+
+        // Define the desired thread lifetime for inactivity (10 minutes)
+        const THREAD_INACTIVITY_LIFETIME_MS = 10 * 60 * 1000; // 10 minutes in milliseconds
+
+        // Step 1: Check if the thread exists and is usable. If not, create it.
+        if (!thread || thread.archived || !logChannel.threads.cache.has(thread.id)) {
+            // Clear any previous timeout associated with this VC, as we're creating a new thread
+            if (threadDeletionTimeouts.has(vc.id)) {
+                clearTimeout(threadDeletionTimeouts.get(vc.id));
+                threadDeletionTimeouts.delete(vc.id);
+            }
+            
+            try {
+                // Create a new private thread
+                thread = await logChannel.threads.create({
+                    name: `🔊 VC Alert (${vc.name})`,
+                    // Use Discord's minimum archive duration (60 mins) for private threads.
+                    // We'll manage actual deletion with setTimeout.
+                    autoArchiveDuration: 60,
+                    type: ChannelType.PrivateThread, // Ensure it's a private thread
+                    reason: `Private VC alert for ${vc.name}`,
+                });
+                activeVCThreads.set(vc.id, thread); // Store the new thread object
+                console.log(`[VC Thread] Created new private thread for ${vc.name}: ${thread.name}`);
+
+            } catch (err) {
+                console.error(`[VC Alert] Failed to create private thread for ${vc.name}:`, err.message);
+                activeVCThreads.delete(vc.id); // Clean up from map if creation failed
+                return;
+            }
+        } else {
+             // If the thread exists and is active, ensure we fetch the latest state
+             // This can prevent issues if the thread object in our map becomes stale
+             try {
+                thread = await logChannel.threads.fetch(thread.id);
+             } catch (err) {
+                console.error(`[VC Alert] Failed to fetch existing private thread ${thread.id} for ${vc.name}:`, err.message);
+                activeVCThreads.delete(vc.id); // Remove stale reference
+                return; // Can't proceed without a valid thread object
+             }
+        }
+
+        // Step 2: Reset the thread's deletion timer on new activity
+        if (threadDeletionTimeouts.has(vc.id)) {
+            clearTimeout(threadDeletionTimeouts.get(vc.id)); // Clear old timeout
+        }
+        const timeoutId = setTimeout(async () => {
+            await thread.delete().catch(err => console.error(`Failed to auto-delete private thread ${thread.id}:`, err.message));
+            activeVCThreads.delete(vc.id); // Remove from active map
+            threadDeletionTimeouts.delete(vc.id); // Remove timeout reference
+            console.log(`[VC Thread] Auto-deleted private thread for ${vc.name} due to inactivity.`);
+        }, THREAD_INACTIVITY_LIFETIME_MS);
+        threadDeletionTimeouts.set(vc.id, timeoutId); // Store new timeout ID
+
+        // Step 3: Add/Update Members in the Thread
+        // This ensures anyone who can view the VC is added to the thread.
+        const allMembers = await vc.guild.members.fetch();
+        const membersToAddPromises = allMembers.filter(m =>
+            !m.user.bot && // Exclude bots
+            vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel) // Check if member can view the VC
+        ).map(m => thread.members.add(m.id).catch(e => { /* console.warn(`Failed to add ${m.user.tag} to private thread: ${e.message}`); */ })); // Suppress common 'already in thread' warnings
+
+        await Promise.allSettled(membersToAddPromises); // Wait for all add operations to complete
+
+        // Step 4: Send the alert message to the thread
+        const msg = await thread.send({ embeds: [embed] }).catch((e) => console.warn(`Failed to send embed in private thread for ${vc.name}: ${e.message}`));
+        if (msg && settings.autoDelete) {
+            // Auto-delete individual alert messages within the thread after 30 seconds (if enabled)
+            setTimeout(() => msg.delete().catch(() => {}), 30_000);
+        }
+
+    } else { // Public VC Alert Logic (no threads involved)
+        const msg = await logChannel.send({ embeds: [embed] }).catch((e) => console.warn(`Failed to send embed in public channel for ${vc.name}: ${e.message}`));
+        if (msg && settings.autoDelete) {
+            setTimeout(() => msg.delete().catch(() => {}), 30_000);
+        }
+    }
 });
 
-// Online alert
+// Online alert (no changes needed here as it doesn't involve threads)
 client.on("presenceUpdate", async (oldPresence, newPresence) => {
-  const member = newPresence.member;
-  if (!member || member.user.bot) return;
+    const member = newPresence.member;
+    if (!member || member.user.bot || newPresence.status !== "online" || oldPresence?.status === "online") return;
 
-  if (newPresence.status !== "online") return;
+    const settings = await getGuildSettings(member.guild.id);
+    if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
 
-  const settings = await GuildSettings.findOne({ guildId: member.guild.id });
-  if (!settings?.alertsEnabled || !settings.onlineAlerts || !settings.textChannelId) return;
+    if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member.roles.cache.has(settings.ignoredRoleId)) {
+        return;
+    }
 
-  // Ignore if member has the ignored role
-  if (settings.ignoreRoleEnabled && settings.ignoredRoleId) {
-    const freshMember = await member.guild.members.fetch(member.id).catch(() => null);
-    if (freshMember?.roles.cache.has(settings.ignoredRoleId)) return;
-  }
+    let channel = member.guild.channels.cache.get(settings.textChannelId);
+    if (!channel || !channel.isTextBased()) {
+        try {
+            channel = await member.guild.channels.fetch(settings.textChannelId);
+        } catch (e) {
+            console.error(`[Online Alert] Failed to fetch log channel ${settings.textChannelId} for guild ${member.guild.id}:`, e.message);
+            return;
+        }
+        if (!channel?.isTextBased()) return;
+    }
 
-  const channel = await client.channels.fetch(settings.textChannelId).catch(() => null);
-  if (!channel || !channel.isTextBased()) return;
+    const embed = new EmbedBuilder()
+        .setColor(EmbedColors.ONLINE)
+        .setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
+        .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
+        .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
+        .setTimestamp();
 
-  const embed = new EmbedBuilder()
-    .setColor(0x55ff55)
-    .setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
-    .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
-    .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
-    .setTimestamp();
-
-  const msg = await channel.send({ embeds: [embed] }).catch(() => {});
-  if (msg && settings.autoDelete) {
-    setTimeout(() => msg.delete().catch(() => {}), 30_000);
-  }
+    const msg = await channel.send({ embeds: [embed] }).catch((e) => console.warn(`Failed to send online alert for ${member.user.username}: ${e.message}`));
+    if (msg && settings.autoDelete) {
+        setTimeout(() => msg.delete().catch(() => {}), 30_000);
+    }
 });
 
 function hasAdminPermission(interaction) {
-  return interaction.memberPermissions.has(PermissionsBitField.Flags.ManageGuild);
+    return interaction.memberPermissions.has(PermissionsBitField.Flags.ManageGuild);
 }
 
 client.login(process.env.TOKEN).catch(err => console.error("❌ Login failed:", err));
