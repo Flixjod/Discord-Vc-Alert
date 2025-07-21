@@ -112,15 +112,16 @@ const buildControlPanel = (settings, guild) => {
       iconURL: client.user.displayAvatarURL()
     })
     .setDescription(
-      `> 📢 **Alerts Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set"}\n` +
-      `> 🔔 **Alerts Status:** ${settings.alertsEnabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
+      `**Your Central Hub for Voice Chat Alerts!** ✨\n\n` +
+      `> 📢 **Alerts Channel:** ${settings.textChannelId ? `<#${settings.textChannelId}>` : "Not set — *assign one below!*"}\n` +
+      `> 🔔 **Status:** ${settings.alertsEnabled ? "🟢 **Active!** (All systems go)" : "🔴 **Disabled** (Peace & quiet)"}\n` +
       `> 👋 **Join Alerts:** ${settings.joinAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🏃‍♂️ **Leave Alerts:** ${settings.leaveAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🟢 **Online Alerts:** ${settings.onlineAlerts ? "✅ On" : "❌ Off"}\n` +
       `> 🪪 **Private Alerts:** ${settings.privateThreadAlerts ? "✅ On" : "❌ Off"}\n` +
-      `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅" : "❌"})` : "None"}\n` +
+      `> 🙈 **Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅ Active" : "❌ Inactive"})` : "None set"}\n` +
       `> 🧹 **Auto-Delete:** ${settings.autoDelete ? "✅ On (30s)" : "❌ Off"}\n\n` +
-      `Use the buttons below to customize your settings on the fly! ⚙️`
+      `*Use the buttons below to fine-tune your settings instantly!* ⚙️`
     )
     .setFooter({
       text: guild?.name || `Server ID: ${settings.guildId}`,
