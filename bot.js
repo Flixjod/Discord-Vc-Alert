@@ -139,12 +139,13 @@ function addLog(type, user, channel = "-", guildName = "-") {
 }
 
 // ---------- MongoDB connection ----------
-mongoose.connect(process.env.MONGO_URI, { keepAlive: true })
-    .then(() => console.log("✅ Connected to MongoDB"))
-    .catch(err => {
-        console.error("❌ MongoDB error:", err.message);
-        process.exit(1);
-    });
+mongoose.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+})
+.then(() => console.log("✅ MongoDB Connected"))
+.catch(err => console.error("❌ MongoDB error:", err.message));
+
 
 // ---------- Discord client ----------
 const client = new Client({
