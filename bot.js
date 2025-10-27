@@ -1,8 +1,3 @@
-// bot.js (optimized single-file)
-// Keep all messages/text identical to the original file per user's request.
-
-"use strict";
-
 const express = require("express");
 const fs = require("fs");
 const fsp = fs.promises;
