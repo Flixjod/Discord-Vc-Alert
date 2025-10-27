@@ -905,4 +905,7 @@ process.on('unhandledRejection', (reason) => {
 // ---------- Start bot ----------
 client.login(process.env.TOKEN).catch(err => console.error("❌ Login failed:", err));
 
-// End of file
+
+
+
+
