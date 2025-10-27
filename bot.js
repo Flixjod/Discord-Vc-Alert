@@ -1,4 +1,7 @@
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
+
 const {
     Client,
     GatewayIntentBits,
@@ -62,6 +65,36 @@ async function updateGuildSettings(settings) {
     guildSettingsCache.set(settings.guildId, settings); // Update cache
 }
 
+// ====== VC LOG SYSTEM ======
+const LOG_FILE_PATH = path.join(__dirname, "vc_logs.txt");
+let recentLogs = [];
+
+function toISTString(timestamp) {
+    return new Date(timestamp).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
+
+function timeAgo(timestamp) {
+    const diff = Date.now() - timestamp;
+    const sec = Math.floor(diff / 1000);
+    const min = Math.floor(sec / 60);
+    const hr = Math.floor(min / 60);
+    if (hr > 0) return `${hr}h ${min % 60}m ago`;
+    if (min > 0) return `${min}m ${sec % 60}s ago`;
+    return `${sec}s ago`;
+}
+
+function addLog(type, user, channel = "-", guildName = "-") {
+    const entry = { type, user, channel, guild: guildName, time: Date.now() };
+    recentLogs.push(entry);
+    fs.appendFileSync(
+        LOG_FILE_PATH,
+        `[${toISTString(entry.time)}] (${guildName}) ${type.toUpperCase()} - ${user} in ${channel}\n`
+    );
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    recentLogs = recentLogs.filter(l => l.time >= cutoff);
+}
+
+
 // Connect MongoDB
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ Connected to MongoDB"))
@@ -85,10 +118,10 @@ const client = new Client({
 // Slash commands
 const commands = [
     new SlashCommandBuilder()
-        .setName("vcstatus")
+        .setName("settings")
         .setDescription("📡 View and control VC/online alerts."),
     new SlashCommandBuilder()
-        .setName("vcon")
+        .setName("activate")
         .setDescription("🚀 Enable voice join/leave alerts.")
         .addChannelOption(option =>
             option.setName("channel")
@@ -97,7 +130,7 @@ const commands = [
                 .setRequired(false)
         ),
     new SlashCommandBuilder()
-        .setName("vcoff")
+        .setName("deactivate")
         .setDescription("🛑 Disable all alerts."),
     new SlashCommandBuilder()
         .setName("setignorerole")
@@ -109,7 +142,10 @@ const commands = [
         ),
     new SlashCommandBuilder()
         .setName("resetignorerole")
-        .setDescription("♻️ Reset the ignored role")
+        .setDescription("♻️ Reset the ignored role"),
+    new SlashCommandBuilder()
+        .setName("vclogs")
+        .setDescription("📜 View the last 24 hours of activity logs.")
 
 ].map(cmd => cmd.toJSON());
 
@@ -234,12 +270,12 @@ client.on(Events.InteractionCreate, async interaction => {
             });
         }
 
-        if (interaction.commandName === "vcstatus") {
+        if (interaction.commandName === "settings") {
             const panel = buildControlPanel(settings, guild);
             return interaction.reply({ embeds: [panel.embed], components: panel.buttons, ephemeral: true });
         }
 
-        if (interaction.commandName === "vcon") {
+        if (interaction.commandName === "activate") {
             const selectedChannel = interaction.options.getChannel("channel");
             let channel = null;
 
@@ -258,7 +294,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 return interaction.reply({
                     embeds: [buildEmbedReply(
                         "❌ Channel Missing",
-                        `Hmm... I couldn't find a valid text channel to send alerts to.\n\nTry using:\n• \`/vcon #your-channel\` to specify one\n• Or make sure the saved one still exists.`,
+                        `Hmm... I couldn't find a valid text channel to send alerts to.\n\nTry using:\n• \`/activate #your-channel\` to specify one\n• Or make sure the saved one still exists.`,
                         EmbedColors.ERROR,
                         guild
                     )],
@@ -283,7 +319,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 return interaction.reply({
                     embeds: [buildEmbedReply(
                         "⚠️ Already On",
-                        `VC alerts are **already active** in <#${channel.id}> 🔊\n\nUse \`/vcstatus\` to manage join, leave, and online alerts. Or change the channel with \`/vcon #new-channel\`.`,
+                        `VC alerts are **already active** in <#${channel.id}> 🔊\n\nUse \`/settings\` to manage join, leave, and online alerts. Or change the channel with \`/activate #new-channel\`.`,
                         EmbedColors.WARNING,
                         guild
                     )],
@@ -298,7 +334,7 @@ client.on(Events.InteractionCreate, async interaction => {
             return interaction.reply({
                 embeds: [buildEmbedReply(
                     "✅ VC Alerts Enabled",
-                    `You're all set! I’ll now post voice activity in <#${channel.id}> 🎙️\n\nUse \`/vcstatus\` anytime to tweak the vibe — join, leave, and online alerts are all customizable. ✨`,
+                    `You're all set! I’ll now post voice activity in <#${channel.id}> 🎙️\n\nUse \`/settings\` anytime to tweak the vibe — join, leave, and online alerts are all customizable. ✨`,
                     EmbedColors.SUCCESS,
                     guild
                 )],
@@ -306,7 +342,7 @@ client.on(Events.InteractionCreate, async interaction => {
             });
         }
 
-        if (interaction.commandName === "vcoff") {
+        if (interaction.commandName === "deactivate") {
             if (!settings.alertsEnabled) {
                 return interaction.reply({
                     embeds: [buildEmbedReply("⚠️ Already Disabled", "VC alerts are already turned off. 🌙", EmbedColors.WARNING, guild)],
@@ -322,7 +358,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     new EmbedBuilder()
                         .setColor(EmbedColors.ERROR)
                         .setAuthor({ name: "VC Alerts Powered Down 🔕", iconURL: client.user.displayAvatarURL() })
-                        .setDescription("🚫 No more **join**, **leave**, or **online** alerts.\nUse `/vcon` to re-enable anytime!")
+                        .setDescription("🚫 No more **join**, **leave**, or **online** alerts.\nUse `/activate` to re-enable anytime!")
                         .setFooter({ text: "🔧 VC Alert Control Panel", iconURL: client.user.displayAvatarURL() })
                         .setTimestamp()
                 ],
@@ -362,6 +398,60 @@ client.on(Events.InteractionCreate, async interaction => {
                 )],
                 ephemeral: true
             });
+        }
+
+        if (interaction.commandName === "vclogs") {
+            if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+                return interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor(0xff5555)
+                            .setTitle("🚫 No Permission")
+                            .setDescription("You need **Manage Server** permission to use `/vclogs`.")
+                            .setTimestamp()
+                    ],
+                    ephemeral: true
+                });
+            }
+        
+            const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+            const logs24h = recentLogs.filter(l => l.time >= cutoff);
+        
+            if (logs24h.length === 0) {
+                return interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor(0x5865f2)
+                            .setTitle("📭 No Logs Found")
+                            .setDescription("No VC or online activity recorded in the last 24 hours.")
+                            .setTimestamp()
+                    ],
+                    ephemeral: true
+                });
+            }
+        
+            const summary = logs24h
+                .slice(-20)
+                .reverse()
+                .map(l => `• **${l.type.toUpperCase()}** — ${l.user} (${l.channel}) • 🕒 ${timeAgo(l.time)} (${toISTString(l.time)})`)
+                .join("\n");
+        
+            const embed = new EmbedBuilder()
+                .setColor(0x5865f2)
+                .setAuthor({ name: "📜 VC Activity Logs (Last 24h)" })
+                .setDescription(summary)
+                .setFooter({ text: "Showing latest 20 entries" })
+                .setTimestamp();
+        
+            if (fs.existsSync(LOG_FILE_PATH)) {
+                return interaction.reply({
+                    embeds: [embed],
+                    files: [{ attachment: LOG_FILE_PATH, name: "vc_logs.txt" }],
+                    ephemeral: true
+                });
+            } else {
+                return interaction.reply({ embeds: [embed], ephemeral: true });
+            }
         }
     }
 
@@ -475,6 +565,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     let embed;
 
     if (!oldState.channelId && newState.channelId && settings.joinAlerts) { // User joined a VC
+        addLog("join", user.tag, newState.channel.name, guild.name);
         embed = new EmbedBuilder()
             .setColor(EmbedColors.VC_JOIN)
             .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar })
@@ -482,6 +573,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             .setFooter({ text: "🎉 Welcome to the voice party!", iconURL: client.user.displayAvatarURL() })
             .setTimestamp();
     } else if (oldState.channelId && !newState.channelId && settings.leaveAlerts) { // User left a VC
+        addLog("leave", user.tag, oldState.channel.name, guild.name);
+
         embed = new EmbedBuilder()
             .setColor(EmbedColors.VC_LEAVE)
             .setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar })
@@ -610,6 +703,8 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
         .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
         .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
         .setTimestamp();
+
+    addLog("online", member.user.tag, "-", member.guild.name);
 
     const msg = await channel.send({ embeds: [embed] }).catch((e) => console.warn(`Failed to send online alert for ${member.user.username}: ${e.message}`));
     if (msg && settings.autoDelete) {
