@@ -22,6 +22,7 @@ const mongoose = require("mongoose");
 
 require("dotenv").config();
 
+
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;
 const LOG_FILE_PATH = path.join(__dirname, "vc_logs.txt");
@@ -35,7 +36,7 @@ const app = express();
 app.get("/", (_, res) => res.status(200).json({ status: "✅ Bot is alive and vibing!" }));
 app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
-// ---------- MongoDB schema & model ----------
+// ---------- Server MongoDB schema & model ----------
 const guildSettingsSchema = new mongoose.Schema({
     guildId: { type: String, required: true, unique: true },
     alertsEnabled: { type: Boolean, default: false },
@@ -78,60 +79,89 @@ function schedulePendingSaves() {
     }, 700); // batch writes within 700ms window
 }
 
+
+// ── SERVER LOGS PART ────────────────────────────────────────────────
+const LOGS_DIR = path.join(__dirname, "logs");
+if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+
+// ── Mongo Schema ───────────────────────────────────────────────
+const LogSchema = new mongoose.Schema({
+    guildId: String,
+    guildName: String,
+    user: String,
+    channel: String,
+    type: String, // "join" | "leave" | "online"
+    time: { type: Date, default: Date.now }
+});
+
+// 🕒 Auto-delete after 30 days
+LogSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
+LogSchema.index({ guildId: 1, time: -1 });
+
+const GuildLog = mongoose.model("GuildLog", LogSchema);
+
+
 // ---------- Utilities ----------
-function toISTString(timestamp) {
-    return new Date(timestamp).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+function toISTString(ts) {
+    return new Date(ts).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        hour12: true,
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit"
+    }).replace(",", "");
 }
 
-function timeAgo(timestamp) {
-    const diff = Date.now() - timestamp;
-    const sec = Math.floor(diff / 1000);
+function fancyAgo(ms) {
+    const sec = Math.floor(ms / 1000);
     const min = Math.floor(sec / 60);
     const hr = Math.floor(min / 60);
-    if (hr > 0) return `${hr}h ${min % 60}m ago`;
-    if (min > 0) return `${min}m ${sec % 60}s ago`;
-    return `${sec}s ago`;
+    if (hr > 0) return `${hr}ʜ ${min % 60}ᴍ ᴀɢᴏ`;
+    if (min > 0) return `${min}ᴍ ${sec % 60}ꜱ ᴀɢᴏ`;
+    return `${sec}ꜱ ᴀɢᴏ`;
 }
 
-async function safeAppendLogLine(line) {
+// ── Core: Store Activity ───────────────────────────────────────
+async function addLog(type, user, channel, guild) {
     try {
-        // rotate file if needed
-        try {
-            const stats = await fsp.stat(LOG_FILE_PATH).catch(() => null);
-            if (stats && stats.size >= LOG_ROTATE_SIZE_BYTES) {
-                const rotated = `${LOG_FILE_PATH}.${Date.now()}`;
-                await fsp.rename(LOG_FILE_PATH, rotated).catch(() => {});
-            }
-        } catch (e) {
-            // ignore rotation failures
-        }
-        await fsp.appendFile(LOG_FILE_PATH, line, { encoding: 'utf8' });
+        await GuildLog.create({
+            guildId: guild.id,
+            guildName: guild.name,
+            user,
+            channel,
+            type,
+            time: Date.now()
+        });
     } catch (err) {
-        console.error("[LOG WRITE] Failed to write log:", err.message);
+        console.error(`[MongoDB Log Error] ${err.message}`);
     }
 }
 
-// ---------- Logging memory store (recent 24h) ----------
-let recentLogs = [];
+// ── Generate Text File on Command ──────────────────────────────
+async function generateActivityFile(guild, logs) {
+    const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
+    const header = 
+`╔══════════════════════════════════════════════╗
+║           🌌 ${guild.name} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
+║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toISTString(Date.now())}     ║
+╚══════════════════════════════════════════════╝
 
-function trimRecentLogs() {
-    const cutoff = Date.now() - RECENT_LOG_RETENTION_MS;
-    recentLogs = recentLogs.filter(l => l.time >= cutoff);
-    if (recentLogs.length > MAX_RECENT_LOGS) {
-        recentLogs = recentLogs.slice(-MAX_RECENT_LOGS);
-    }
+`;
+    const body = logs.map(l => {
+        const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
+        const ago = fancyAgo(Date.now() - l.time);
+        const action = l.type === "join" ? "entered" :
+                       l.type === "leave" ? "left" : "came online";
+        return `${emoji} ${l.type === "join" ? "ᴊᴏɪɴ" : l.type === "leave" ? "ʟᴇᴀᴠᴇ" : "ᴏɴʟɪɴᴇ"} — ${l.user} ${action} ${l.channel}
+   🕒 ${ago} • ${toISTString(l.time)}\n`;
+    }).join("\n");
+
+    await fsp.writeFile(filePath, header + body, "utf8");
+    return filePath;
 }
 
-function addLog(type, user, channel = "-", guildName = "-") {
-    const entry = { type, user, channel, guild: guildName, time: Date.now() };
-    recentLogs.push(entry);
-    // Keep recent logs trimmed
-    trimRecentLogs();
-
-    // Async append to file; keep same text format exactly as original
-    const line = `[${toISTString(entry.time)}] (${guildName}) ${type.toUpperCase()} - ${user} in ${channel}\n`;
-    safeAppendLogLine(line);
-}
 
 // ---------- MongoDB connection ----------
 mongoose.connect(process.env.MONGO_URI, {
@@ -291,38 +321,62 @@ function buildEmbedReply(title, description, color, guild) {
         .setTimestamp();
 }
 
-// ---------- Commands registration ----------
 const commands = [
     new SlashCommandBuilder()
         .setName("settings")
-        .setDescription("📡 View and control VC/online alerts."),
+        .setDescription("⚙️ ᴠɪᴇᴡ ᴀɴᴅ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ꜱᴇʀᴠᴇʀ’ꜱ ᴠᴏɪᴄᴇ ᴀᴄᴛɪᴠɪᴛʏ, ᴏɴʟɪɴᴇ, ᴀɴᴅ ᴘʀᴇꜱᴇɴᴄᴇ ᴀʟᴇʀᴛꜱ."),
+
     new SlashCommandBuilder()
         .setName("activate")
-        .setDescription("🚀 Enable voice join/leave alerts.")
+        .setDescription("🚀 ᴀᴄᴛɪᴠᴀᴛᴇ ᴀᴜᴛᴏᴍᴀᴛᴇᴅ ɴᴏᴛɪꜰɪᴄᴀᴛɪᴏɴꜱ ꜰᴏʀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ ᴊᴏɪɴꜱ, ʟᴇᴀᴠᴇꜱ, ᴀɴᴅ ꜱᴛᴀᴛᴜꜱ ᴄʜᴀɴɢᴇꜱ.")
         .addChannelOption(option =>
-            option.setName("channel")
-                .setDescription("Channel for VC alerts")
+            option
+                .setName("channel")
+                .setDescription("💬 ꜱᴇʟᴇᴄᴛ ᴀ ᴛᴇxᴛ ᴄʜᴀɴɴᴇʟ ᴡʜᴇʀᴇ ᴀʟᴇʀᴛꜱ ᴡɪʟʟ ʙᴇ ꜱᴇɴᴛ.")
                 .addChannelTypes(ChannelType.GuildText)
                 .setRequired(false)
         ),
+
     new SlashCommandBuilder()
         .setName("deactivate")
-        .setDescription("🛑 Disable all alerts."),
+        .setDescription("🛑 ᴅɪꜱᴀʙʟᴇ ᴀʟʟ ᴏɴɢᴏɪɴɢ ᴀʟᴇʀᴛꜱ, ɪɴᴄʟᴜᴅɪɴɢ ᴠᴏɪᴄᴇ ᴀᴄᴛɪᴠɪᴛʏ, ᴏɴʟɪɴᴇ ꜱᴛᴀᴛᴜꜱ, ᴀɴᴅ ᴘʀᴇꜱᴇɴᴄᴇ ᴜᴘᴅᴀᴛᴇꜱ."),
+
     new SlashCommandBuilder()
         .setName("setignorerole")
-        .setDescription("🙈 Set a role to be ignored from VC/online alerts")
+        .setDescription("🙈 ᴇxᴄʟᴜᴅᴇ ᴀ ʀᴏʟᴇ ꜰʀᴏᴍ ʀᴇᴄᴇɪᴠɪɴɢ ᴏʀ ᴛʀɪɢɢᴇʀɪɴɢ ᴀɴʏ ᴀᴄᴛɪᴠɪᴛʏ ᴀʟᴇʀᴛꜱ.")
         .addRoleOption(option =>
-            option.setName("role")
-                .setDescription("The role to ignore from alerts")
+            option
+                .setName("role")
+                .setDescription("🎭 ꜱᴇʟᴇᴄᴛ ᴀ ʀᴏʟᴇ ᴛᴏ ʙᴇ ɪɢɴᴏʀᴇᴅ ꜰʀᴏᴍ ᴠᴏɪᴄᴇ/ᴏɴʟɪɴᴇ ᴀʟᴇʀᴛꜱ.")
                 .setRequired(true)
         ),
+
     new SlashCommandBuilder()
         .setName("resetignorerole")
-        .setDescription("♻️ Reset the ignored role"),
+        .setDescription("♻️ ʀᴇꜱᴇᴛ ᴛʜᴇ ɪɢɴᴏʀᴇᴅ ʀᴏʟᴇ ꜱᴇᴛᴛɪɴɢ ᴛᴏ ᴀʟʟᴏᴡ ᴀʟʟ ᴜꜱᴇʀꜱ ᴀɢᴀɪɴ."),
+
     new SlashCommandBuilder()
         .setName("logs")
-        .setDescription("📜 View the last 24 hours of activity logs.")
-].map(cmd => cmd.toJSON());
+        .setDescription("📜 ᴠɪᴇᴡ ᴅᴇᴛᴀɪʟᴇᴅ ꜱᴇʀᴠᴇʀ ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ ᴛᴏ ᴛʀᴀᴄᴋ ᴜꜱᴇʀ ᴇɴᴛʀʏ, ᴇxɪᴛꜱ, ᴀɴᴅ ꜱᴛᴀᴛᴜꜱ ᴄʜᴀɴɢᴇꜱ.")
+        .addStringOption(opt =>
+            opt
+                .setName("range")
+                .setDescription("🕒 ꜱᴇʟᴇᴄᴛ ᴀ ᴛɪᴍᴇ ᴘᴇʀɪᴏᴅ ᴛᴏ ᴠɪᴇᴡ ʀᴇᴄᴇɴᴛ ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ.")
+                .setRequired(false)
+                .addChoices(
+                    { name: "📅 ᴛᴏᴅᴀʏ", value: "today" },
+                    { name: "🕓 ʏᴇꜱᴛᴇʀᴅᴀʏ", value: "yesterday" },
+                    { name: "📆 ʟᴀꜱᴛ 𝟳 ᴅᴀʏꜱ", value: "7days" },
+                    { name: "🗓️ ʟᴀꜱᴛ 𝟯𝟬 ᴅᴀʏꜱ", value: "30days" }
+                )
+        )
+        .addUserOption(opt =>
+            opt
+                .setName("user")
+                .setDescription("👤 ꜱᴇʟᴇᴄᴛ ᴀ ᴜꜱᴇʀ ᴛᴏ ᴠɪᴇᴡ ᴛʜᴇɪʀ ᴘᴇʀꜱᴏɴᴀʟɪᴢᴇᴅ ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ.")
+                .setRequired(false)
+        ),
+];
 
 
 // ---------- Ready & register commands ----------
@@ -488,47 +542,72 @@ client.on(Events.InteractionCreate, async interaction => {
             }
 
             if (interaction.commandName === "logs") {
-    
-                const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-                const logs24h = recentLogs.filter(l => l.time >= cutoff);
-
-                if (logs24h.length === 0) {
-                    return interaction.reply({
-                        embeds: [
-                            new EmbedBuilder()
-                                .setColor(0x5865f2)
-                                .setTitle("📭 No Logs Found")
-                                .setDescription("No VC or online activity recorded in the last 24 hours.")
-                                .setTimestamp()
-                        ],
-                        ephemeral: true
-                    });
+                await interaction.deferReply({ ephemeral: true });
+                const guild = interaction.guild;
+                const range = interaction.options.getString("range");
+                const targetUser = interaction.options.getUser("target");
+            
+                const now = new Date();
+                let startTime;
+            
+                if (range === "today") {
+                    startTime = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+                } else if (range === "yesterday") {
+                    startTime = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
+                } else if (range === "7days") {
+                    startTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                } else if (range === "30days") {
+                    startTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
                 }
-
-                const summary = logs24h
-                    .slice(-20)
-                    .reverse()
-                    .map(l => `• **${l.type.toUpperCase()}** — ${l.user} (${l.channel}) • 🕒 ${timeAgo(l.time)} (${toISTString(l.time)})`)
-                    .join("\n");
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x5865f2)
-                    .setAuthor({ name: "📜 VC Activity Logs (Last 24h)" })
-                    .setDescription(summary)
-                    .setFooter({ text: "Showing latest 20 entries" })
-                    .setTimestamp();
-
-                if (fs.existsSync(LOG_FILE_PATH)) {
-                    return interaction.reply({
-                        embeds: [embed],
-                        files: [{ attachment: LOG_FILE_PATH, name: "vc_logs.txt" }],
-                        ephemeral: true
-                    });
+            
+                let query = { guildId: guild.id };
+                if (range === "user") {
+                    if (!targetUser)
+                        return interaction.editReply("❌ ᴘʟᴇᴀꜱᴇ ᴍᴇɴᴛɪᴏɴ ᴀ ᴜꜱᴇʀ ꜰᴏʀ ᴛʜɪꜱ ᴏᴘᴛɪᴏɴ.");
+                    query.user = targetUser.tag;
                 } else {
-                    return interaction.reply({ embeds: [embed], ephemeral: true });
+                    query.time = { $gte: startTime };
                 }
+            
+                const logs = await GuildLog.find(query).sort({ time: -1 }).lean();
+            
+                if (logs.length === 0) {
+                    const title = range === "user"
+                        ? `📭 ɴᴏ ᴀᴄᴛɪᴠɪᴛʏ ꜰᴏᴜɴᴅ ꜰᴏʀ ${targetUser.toString()}`
+                        : `📭 ɴᴏ ʟᴏɢꜱ ꜰᴏᴜɴᴅ ꜰᴏʀ ${range === "today" ? "ᴛᴏᴅᴀʏ" : range === "yesterday" ? "ʏᴇꜱᴛᴇʀᴅᴀʏ" : range === "7days" ? "ᴛʜᴇ ʟᴀꜱᴛ 7 ᴅᴀʏꜱ" : "ᴛʜᴇ ʟᴀꜱᴛ 30 ᴅᴀʏꜱ"}`;
+                    return interaction.editReply({
+                        embeds: [ new EmbedBuilder().setColor(0x5865f2).setTitle(title).setTimestamp() ]
+                    });
+                }
+            
+                const recent = logs.slice(0, 20);
+                const desc = recent.map(l => {
+                    const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
+                    const ago = fancyAgo(Date.now() - l.time);
+                    const action = l.type === "join" ? "entered" :
+                                   l.type === "leave" ? "left" : "came online";
+                    return `**${emoji} ${l.type === "join" ? "ᴊᴏɪɴ" : l.type === "leave" ? "ʟᴇᴀᴠᴇ" : "ᴏɴʟɪɴᴇ"}** — ${l.user} ${action} ${l.channel}\n> 🕒 ${ago} • ${toISTString(l.time)}`;
+                }).join("\n\n");
+            
+                const title = range === "user"
+                    ? `📜 ${guild.name} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ — ${targetUser.toString()}`
+                    : `📜 ${guild.name} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ (${range === "today" ? "ᴛᴏᴅᴀʏ" :
+                       range === "yesterday" ? "ʏᴇꜱᴛᴇʀᴅᴀʏ" :
+                       range === "7days" ? "ʟᴀꜱᴛ 7 ᴅᴀʏꜱ" : "ʟᴀꜱᴛ 30 ᴅᴀʏꜱ"})`;
+            
+                const embed = new EmbedBuilder()
+                    .setColor(0x2b2d31)
+                    .setTitle(title)
+                    .setDescription(desc)
+                    .setFooter({ text: `ꜱʜᴏᴡɪɴɢ ʟᴀᴛᴇꜱᴛ 20 ᴇɴᴛʀɪᴇꜱ • ꜱᴇʀᴠᴇʀ: ${guild.name}` })
+                    .setTimestamp();
+            
+                const filePath = await generateActivityFile(guild, logs);
+                return interaction.editReply({
+                    embeds: [embed],
+                    files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }]
+                });
             }
-        }
 
         // Button interactions
         if (interaction.isButton()) {
