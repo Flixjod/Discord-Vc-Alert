@@ -2,7 +2,7 @@
   "name": "flix-vc-alert",
   "version": "1.0.0",
   "main": "bot.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "start": "node bot.js"
   },
