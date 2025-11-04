@@ -397,39 +397,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         case "logs": {
           await interaction.deferReply({ ephemeral: true });
-          const range = interaction.options.getString("range");
-          const targetUser = interaction.options.getUser("user");
-
-          const now = new Date();
-          let startTime;
-          if (!range && !targetUser) startTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
-          if (range === "today") startTime = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-          else if (range === "yesterday") startTime = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
-          else if (range === "7days") startTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
-          else if (range === "30days") startTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
-
-          let query = { guildId: guild.id };
-          if (targetUser) query.user = targetUser.tag;
-          else query.time = { $gte: startTime };
-
-          const logs = await GuildLog.find(query).sort({ time: -1 }).lean();
+      
+          const logs = await GuildLog.find({ guildId: guild.id }).sort({ time: -1 }).limit(20).lean();
+      
           if (logs.length === 0) {
-            const title = targetUser ? `No activity found for ${targetUser.tag}` : "No logs found for that range";
-            return interaction.editReply({ embeds: [makeEmbed({ title, description: "", color: EmbedColors.INFO, guild })] });
+              return interaction.editReply({
+                  embeds: [makeEmbed({
+                      title: "No recent activity found",
+                      description: "",
+                      color: EmbedColors.INFO,
+                      guild
+                  })]
+              });
           }
-
-          const recent = logs.slice(0, 20);
-          const desc = recent.map(l => {
-            const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
-            const ago = fancyAgo(Date.now() - l.time);
-            const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
-            return `**${emoji} ${l.type.toUpperCase()}** — ${l.user} ${action} ${l.channel}\n> 🕒 ${ago} • ${toISTString(l.time)}`;
+      
+          const desc = logs.map(l => {
+              const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
+              const ago = fancyAgo(Date.now() - l.time);
+              const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
+              return `**${emoji} ${l.type.toUpperCase()}** — ${l.user} ${action} ${l.channel}\n> 🕒 ${ago} • ${toISTString(l.time)}`;
           }).join("\n\n");
-
-          const title = targetUser ? `${guild.name} activity — ${targetUser.tag}` : `${guild.name} activity logs`;
-          const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(toSmallCaps(title)).setDescription(toSmallCaps(desc)).setFooter({ text: toSmallCaps(`Showing latest ${recent.length} entries • Server: ${guild.name}`) }).setTimestamp();
+      
+          const embed = new EmbedBuilder()
+              .setColor(0x2b2d31)
+              .setTitle(toSmallCaps(`${guild.name} recent activity`))
+              .setDescription(toSmallCaps(desc))
+              .setFooter({ text: toSmallCaps(`Showing latest ${logs.length} entries • Server: ${guild.name}`) })
+              .setTimestamp();
+      
           const filePath = await generateActivityFile(guild, logs);
-          await interaction.followUp({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }], ephemeral: false });
+          await interaction.followUp({
+              embeds: [embed],
+              files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }],
+              ephemeral: false
+          });
         }
       }
     }
