@@ -316,7 +316,7 @@ const commands = [
 ].map(c => c.toJSON());
 
 // ---------- Ready & register commands ----------
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
   try { client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" }); } catch(e) {}
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
