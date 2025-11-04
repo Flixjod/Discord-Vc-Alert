@@ -13,5 +13,8 @@ RUN npm install
 # Copy the rest of your bot code
 COPY . .
 
+# Expose port if using Express
+EXPOSE 3000
+
 # Start the bot
 CMD ["npm", "start"]
