@@ -429,7 +429,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const title = targetUser ? `${guild.name} activity — ${targetUser.tag}` : `${guild.name} activity logs`;
           const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(toSmallCaps(title)).setDescription(toSmallCaps(desc)).setFooter({ text: toSmallCaps(`Showing latest ${recent.length} entries • Server: ${guild.name}`) }).setTimestamp();
           const filePath = await generateActivityFile(guild, logs);
-          return interaction.editReply({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }] });
+          await interaction.followUp({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }], ephemeral: false });
         }
       }
     }
