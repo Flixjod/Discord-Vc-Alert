@@ -559,22 +559,71 @@ client.on(Events.InteractionCreate, async (interaction) => {
           break;
         case "resetSettings": {
           const confirmRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId("confirmReset").setLabel(toSmallCaps("✅ Confirm Reset")).setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId("cancelReset").setLabel(toSmallCaps("❌ Cancel")).setStyle(ButtonStyle.Secondary)
+            new ButtonBuilder()
+              .setCustomId("confirmReset")
+              .setLabel("✅ Yes, Reset")
+              .setStyle(ButtonStyle.Danger),
+            new ButtonBuilder()
+              .setCustomId("cancelReset")
+              .setLabel("❌ No, Cancel")
+              .setStyle(ButtonStyle.Secondary)
           );
-          return interaction.update({ embeds: [makeEmbed({ title: "Confirm Settings Reset", description: "Are you sure you want to reset all VC alert settings to default?", color: EmbedColors.WARNING, guild })], components: [confirmRow] });
+        
+          return interaction.update({
+            embeds: [
+              makeEmbed({
+                title: "⚠️ Confirm Reset",
+                description:
+                  "You are about to **reset all VC alert settings** to default. 🪷\n" +
+                  "This will remove custom channels, ignored roles, and alert preferences.\n\n" +
+                  "Do you want to proceed?",
+                color: EmbedColors.WARNING,
+                guild,
+              })
+            ],
+            components: [confirmRow]
+          });
         }
+        
         case "confirmReset": {
-          await GuildSettings.deleteOne({ guildId }).catch(e => console.error(`[DB] Reset delete failed for ${guildId}:`, e?.message ?? e));
+          await GuildSettings.deleteOne({ guildId }).catch(e =>
+            console.error(`[DB] Reset delete failed for ${guildId}:`, e?.message ?? e)
+          );
           guildSettingsCache.delete(guildId);
-          settingsToUpdate = await getGuildSettings(guildId);
-          await interaction.followUp({ embeds: [makeEmbed({ title: "Settings Reset", description: "All settings restored to default.", color: EmbedColors.RESET, guild })], ephemeral: true });
+          const settingsToUpdate = await getGuildSettings(guildId);
+        
+          await interaction.followUp({
+            embeds: [
+              makeEmbed({
+                title: "✅ Settings Reset!",
+                description:
+                  "All VC alert settings have been restored to **default**. ✨\n" +
+                  "You can now use the control panel below to configure your alerts again.",
+                color: EmbedColors.RESET,
+                guild,
+              })
+            ],
+            ephemeral: true
+          });
+        
           const newPanel = buildControlPanel(settingsToUpdate, guild);
           return interaction.message.edit({ embeds: [newPanel.embed], components: newPanel.buttons });
         }
+        
         case "cancelReset": {
           const cancelPanel = buildControlPanel(settingsToUpdate, guild);
-          return interaction.update({ embeds: [cancelPanel.embed], components: cancelPanel.buttons });
+          return interaction.update({
+            embeds: [
+              makeEmbed({
+                title: "❌ Reset Canceled",
+                description:
+                  "No changes were made. 🛡️\nYou can continue configuring your VC alerts normally.",
+                color: EmbedColors.RESET,
+                guild,
+              })
+            ],
+            components: cancelPanel.buttons
+          });
         }
         default:
           break;
