@@ -626,12 +626,12 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     const member = newState.member ?? oldState.member;
     if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member?.roles?.cache?.has(settings.ignoredRoleId)) return;
 
-    // Ignore VC switch
+    // Ignore VC switch (move)
     if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) return;
 
     const logChannel = await fetchTextChannel(guild, settings.textChannelId);
     if (!logChannel) {
-      console.error(`[VC Alert] Could not fetch log channel ${settings.textChannelId} for ${guild.id}`);
+      console.error(`[VC Alert] ❌ Could not fetch log channel ${settings.textChannelId} for ${guild.id}`);
       return;
     }
 
@@ -644,8 +644,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       embed = new EmbedBuilder()
         .setColor(EmbedColors.VC_JOIN)
         .setAuthor({ name: toSmallCaps(`${user.username} just popped in! 🔊`), iconURL: avatar })
-        .setDescription(toSmallCaps(`🎧 ${user.username} joined ${newState.channel.name} — Let the vibes begin!`))
-        .setFooter({ text: toSmallCaps("🎉 Welcome to the voice party!"), iconURL: client.user.displayAvatarURL() })
+        .setDescription(toSmallCaps(`🎧 ${user.username} joined ${newState.channel.name} — let the vibes begin!`))
+        .setFooter({ text: toSmallCaps("🎉 welcome to the voice party!"), iconURL: client.user.displayAvatarURL() })
         .setTimestamp();
     }
 
@@ -655,8 +655,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       embed = new EmbedBuilder()
         .setColor(EmbedColors.VC_LEAVE)
         .setAuthor({ name: toSmallCaps(`${user.username} dipped out! 🏃‍♂️`), iconURL: avatar })
-        .setDescription(toSmallCaps(`👋 ${user.username} left ${oldState.channel.name} — See ya next time!`))
-        .setFooter({ text: toSmallCaps("💨 Gone but not forgotten."), iconURL: client.user.displayAvatarURL() })
+        .setDescription(toSmallCaps(`👋 ${user.username} left ${oldState.channel.name} — see ya next time!`))
+        .setFooter({ text: toSmallCaps("💨 gone but not forgotten."), iconURL: client.user.displayAvatarURL() })
         .setTimestamp();
     } else return;
 
@@ -670,24 +670,24 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     if (isPrivateVC && settings.privateThreadAlerts) {
       let thread = activeVCThreads.get(vc.id);
 
-      // If thread is missing or invalid, create a new one
+      // Reuse existing or create new private thread
       if (!thread || thread.archived || !thread.id) {
         try {
           thread = await logChannel.threads.create({
-            name: `🔊 VC Alert (${vc.name})`,
-            autoArchiveDuration: 1440, // 24h (manual cleanup anyway)
+            name: `🔊 ${vc.name} | VC Alerts`,
+            autoArchiveDuration: 1440, // 24 hours
             type: ChannelType.PrivateThread,
-            reason: `Private VC alert for ${vc.name}`,
+            reason: `Private VC alert thread for ${vc.name}`,
           });
           activeVCThreads.set(vc.id, thread);
-          console.log(`[VC Thread] Created private thread for ${vc.name}`);
+          console.log(`[VC Thread] 🧵 Created new private thread for ${vc.name}`);
         } catch (err) {
-          console.error(`[VC Alert] Failed to create thread for ${vc.name}:`, err.message);
+          console.error(`[VC Alert] ❌ Failed to create thread for ${vc.name}:`, err.message);
           return;
         }
       }
 
-      // Reset the inactivity timer (each join/leave restarts 5min countdown)
+      // Reset inactivity timer — delete thread after 5 min of no joins/leaves
       if (threadDeletionTimeouts.has(vc.id)) {
         clearTimeout(threadDeletionTimeouts.get(vc.id));
         threadDeletionTimeouts.delete(vc.id);
@@ -696,28 +696,41 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       const timeoutId = setTimeout(async () => {
         try {
           await thread.delete().catch(() => {});
-          console.log(`[VC Thread] Deleted thread for ${vc.name} due to inactivity.`);
+          console.log(`[VC Thread] 🗑️ Deleted thread for ${vc.name} (inactive).`);
         } catch {}
         activeVCThreads.delete(vc.id);
         threadDeletionTimeouts.delete(vc.id);
       }, THREAD_INACTIVITY_MS);
       threadDeletionTimeouts.set(vc.id, timeoutId);
 
-      // Add all visible VC members to thread (best effort)
-      try {
-        const members = await vc.guild.members.fetch();
-        const visible = members.filter(m => !m.user.bot && vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel));
-        for (const m of visible.values()) await thread.members.add(m.id).catch(() => {});
-      } catch {}
+      // Add visible members to thread
+      (async () => {
+        try {
+          const members = await vc.guild.members.fetch();
+          const visible = members.filter(m => !m.user.bot && vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel));
+          for (const m of visible.values()) thread.members.add(m.id).catch(() => {});
+        } catch {}
+      })();
 
-      // ✅ Send alert immediately — multiple users can trigger concurrently
-      const msg = await thread.send({ embeds: [embed] }).catch(e => console.warn(`[VC Thread] Send failed in ${vc.name}:`, e.message));
-      if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
+      // Update thread name with live member count
+      const membersInVC = vc.members.filter(m => !m.user.bot).size;
+      thread.setName(`🔊 ${vc.name} | ${membersInVC} Inside`).catch(() => {});
+
+      // ⚡ Send join/leave alert
+      (async () => {
+        try {
+          const msg = await thread.send({ embeds: [embed] });
+          if (msg && settings.autoDelete)
+            setTimeout(() => msg.delete().catch(() => {}), 30_000);
+        } catch (err) {
+          console.warn(`[VC Thread] ⚠️ Failed to send in ${vc.name}:`, err.message);
+        }
+      })();
     }
 
-    // ---- PUBLIC CHANNEL ALERTS ----
+    // ---- PUBLIC ALERTS ----
     else {
-      const msg = await logChannel.send({ embeds: [embed] }).catch(e => console.warn(`[VC Alert] Send failed in ${vc.name}:`, e.message));
+      const msg = await logChannel.send({ embeds: [embed] }).catch(e => console.warn(`[VC Alert] ⚠️ Send failed in ${vc.name}:`, e.message));
       if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
     }
 
