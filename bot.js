@@ -341,58 +341,156 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!await checkAdmin(interaction)) return;
 
       switch (interaction.commandName) {
+        // ⚙️ SETTINGS PANEL
         case "settings": {
           const panel = buildControlPanel(settings, guild);
-          return interaction.reply({ embeds: [panel.embed], components: panel.buttons, ephemeral: true });
+          return interaction.reply({
+            embeds: [panel.embed],
+            components: panel.buttons,
+            ephemeral: true,
+          });
         }
-
+      
+        // 🚀 ACTIVATE VC ALERTS
         case "activate": {
           const selected = interaction.options.getChannel("channel");
-          let channel = selected ?? (settings.textChannelId ? (guild.channels.cache.get(settings.textChannelId) ?? await guild.channels.fetch(settings.textChannelId).catch(() => null)) : interaction.channel);
-
+          let channel = selected ?? (
+            settings.textChannelId
+              ? (guild.channels.cache.get(settings.textChannelId) ??
+                 await guild.channels.fetch(settings.textChannelId).catch(() => null))
+              : interaction.channel
+          );
+      
           if (!channel || channel.type !== ChannelType.GuildText) {
-            return interaction.reply({ embeds: [makeEmbed({ title: "Channel Missing", description: "I couldn't find a valid text channel to send alerts to. Try /activate #channel or check saved channel.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+            return interaction.reply({
+              embeds: [
+                makeEmbed({
+                  title: toSmallCaps("⚠️ invalid channel"),
+                  description: toSmallCaps("please choose a **text channel** where i can post vc alerts.\ntry `/activate #channel` to set one manually 💬"),
+                  color: EmbedColors.ERROR,
+                  guild,
+                }),
+              ],
+              ephemeral: true,
+            });
           }
-
+      
           const botMember = await guild.members.fetch(client.user.id).catch(() => null);
           const perms = channel.permissionsFor(botMember);
           if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages)) {
-            return interaction.reply({ embeds: [makeEmbed({ title: "No Permission", description: `I can't post in <#${channel.id}>. Give me View and Send permissions.`, color: EmbedColors.ERROR, guild })], ephemeral: true });
+            return interaction.reply({
+              embeds: [
+                makeEmbed({
+                  title: toSmallCaps("🚫 missing permissions"),
+                  description: toSmallCaps(`i need **view** + **send** permissions in ${channel} to post vc alerts.\nplease fix that and try again 🔧`),
+                  color: EmbedColors.ERROR,
+                  guild,
+                }),
+              ],
+              ephemeral: true,
+            });
           }
-
+      
           if (settings.alertsEnabled && settings.textChannelId === channel.id) {
-            return interaction.reply({ embeds: [makeEmbed({ title: "Already On", description: `VC alerts are already active in <#${channel.id}>. Use /settings to manage them.`, color: EmbedColors.WARNING, guild })], ephemeral: true });
+            return interaction.reply({
+              embeds: [
+                makeEmbed({
+                  title: toSmallCaps("🟢 vc alerts already active"),
+                  description: toSmallCaps(`alerts are already running in ${channel} ⚡\nuse \`/settings\` to tweak or customize them.`),
+                  color: EmbedColors.WARNING,
+                  guild,
+                }),
+              ],
+              ephemeral: true,
+            });
           }
-
+      
           settings.alertsEnabled = true;
           settings.textChannelId = channel.id;
           await updateGuildSettings(settings);
-
-          return interaction.reply({ embeds: [makeEmbed({ title: "VC Alerts Enabled", description: `You're all set! I'll post voice activity in <#${channel.id}>. Use /settings to tweak.`, color: EmbedColors.SUCCESS, guild })], ephemeral: true });
+      
+          return interaction.reply({
+            embeds: [
+              makeEmbed({
+                title: toSmallCaps("✅ vc alerts activated"),
+                description: toSmallCaps(`vibe monitor engaged! 🎧\nall voice activity will now appear in ${channel}.\nuse \`/settings\` to fine-tune your alerts ✨`),
+                color: EmbedColors.SUCCESS,
+                guild,
+              }),
+            ],
+            ephemeral: true,
+          });
         }
-
+      
+        // 🔕 DEACTIVATE VC ALERTS
         case "deactivate": {
           if (!settings.alertsEnabled) {
-            return interaction.reply({ embeds: [makeEmbed({ title: "Already Disabled", description: "VC alerts are already turned off.", color: EmbedColors.WARNING, guild })], ephemeral: true });
+            return interaction.reply({
+              embeds: [
+                makeEmbed({
+                  title: toSmallCaps("💤 vc alerts already off"),
+                  description: toSmallCaps("they’re already paused 😴\nuse `/activate` when you’re ready to bring the vibes back."),
+                  color: EmbedColors.WARNING,
+                  guild,
+                }),
+              ],
+              ephemeral: true,
+            });
           }
+      
           settings.alertsEnabled = false;
           await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: "VC Alerts Powered Down", description: "No more join, leave, or online alerts. Use /activate to re-enable.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+      
+          return interaction.reply({
+            embeds: [
+              makeEmbed({
+                title: toSmallCaps("🔕 vc alerts powered down"),
+                description: toSmallCaps("taking a chill break 🪷\nno join or leave pings until you power them up again with `/activate`."),
+                color: EmbedColors.ERROR,
+                guild,
+              }),
+            ],
+            ephemeral: true,
+          });
         }
-
+      
+        // 🙈 SET IGNORED ROLE
         case "setignorerole": {
           const role = interaction.options.getRole("role");
           settings.ignoredRoleId = role.id;
           settings.ignoreRoleEnabled = true;
           await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: "Ignored Role Set", description: `Members with role ${role} will now be ignored.`, color: EmbedColors.RESET, guild })], ephemeral: true });
+      
+          return interaction.reply({
+            embeds: [
+              makeEmbed({
+                title: toSmallCaps("🙈 ignored role set"),
+                description: toSmallCaps(`members with the ${role} role will now be skipped in vc alerts 🚫\nperfect for staff, bots, or background lurkers 😌`),
+                color: EmbedColors.RESET,
+                guild,
+              }),
+            ],
+            ephemeral: true,
+          });
         }
-
+      
+        // 👀 RESET IGNORED ROLE
         case "resetignorerole": {
           settings.ignoredRoleId = null;
           settings.ignoreRoleEnabled = false;
           await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: "Ignored Role Reset", description: "The ignored role has been removed. All members included in alerts now.", color: EmbedColors.RESET, guild })], ephemeral: true });
+      
+          return interaction.reply({
+            embeds: [
+              makeEmbed({
+                title: toSmallCaps("👀 ignored role cleared"),
+                description: toSmallCaps("everyone’s back on the radar 🌍\nall members will now appear in vc alerts again 💫"),
+                color: EmbedColors.RESET,
+                guild,
+              }),
+            ],
+            ephemeral: true,
+          });
         }
 
         case "logs": {
