@@ -712,10 +712,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         } catch {}
       })();
 
-      // Update thread name with live member count
-      const membersInVC = vc.members.filter(m => !m.user.bot).size;
-      thread.setName(`🔊 ${vc.name} | ${membersInVC} Inside`).catch(() => {});
-
       // ⚡ Send join/leave alert
       (async () => {
         try {
