@@ -32,7 +32,6 @@ const PORT = process.env.PORT || 3000;
 const LOG_FILE_PATH = path.join(__dirname, "vc_logs.txt");
 const MAX_RECENT_LOGS = 5000;
 const LOG_ROTATE_SIZE_BYTES = 5 * 1024 * 1024;
-const THREAD_INACTIVITY_LIFETIME_MS = 10 * 60 * 1000; // 10 minutes
 const RECENT_LOG_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
 const LOGS_DIR = path.join(__dirname, "logs");
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -586,13 +585,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         
         case "confirmReset": {
+          // Delete existing settings
           await GuildSettings.deleteOne({ guildId }).catch(e =>
             console.error(`[DB] Reset delete failed for ${guildId}:`, e?.message ?? e)
           );
           guildSettingsCache.delete(guildId);
-          const settingsToUpdate = await getGuildSettings(guildId);
         
-          await interaction.followUp({
+          // Recreate default settings
+          const newSettings = await getGuildSettings(guildId);
+        
+          // Rebuild full control panel like normal
+          const panel = buildControlPanel(newSettings, guild);
+        
+          return interaction.update({
             embeds: [
               makeEmbed({
                 title: "✅ Settings Reset!",
@@ -601,17 +606,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
                   "You can now use the control panel below to configure your alerts again.",
                 color: EmbedColors.RESET,
                 guild,
-              })
+              }),
+              panel.embed // Show full updated panel immediately below message
             ],
-            ephemeral: true
+            components: panel.buttons
           });
-        
-          const newPanel = buildControlPanel(settingsToUpdate, guild);
-          return interaction.message.edit({ embeds: [newPanel.embed], components: newPanel.buttons });
         }
         
         case "cancelReset": {
-          const cancelPanel = buildControlPanel(settingsToUpdate, guild);
+          // Rebuild full panel without changes
+          const currentSettings = await getGuildSettings(guildId);
+          const panel = buildControlPanel(currentSettings, guild);
+        
           return interaction.update({
             embeds: [
               makeEmbed({
@@ -620,9 +626,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
                   "No changes were made. 🛡️\nYou can continue configuring your VC alerts normally.",
                 color: EmbedColors.RESET,
                 guild,
-              })
+              }),
+              panel.embed // Show full panel like original
             ],
-            components: cancelPanel.buttons
+            components: panel.buttons
           });
         }
         default:
