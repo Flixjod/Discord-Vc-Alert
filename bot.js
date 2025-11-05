@@ -876,7 +876,7 @@ process.on('unhandledRejection', (reason) => {
     await mongoose.connect(process.env.MONGO_URI, {
       dbName: "Discord-Alert-Bot"
     });
-    console.log("✅ MongoDB Connected to DB: Discord-Alert-Bot");
+    console.log("✅ MongoDB Connected to DB");
   } catch (e) {
     console.error("❌ MongoDB connection error:", e?.message ?? e);
     process.exit(1);
