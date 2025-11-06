@@ -725,9 +725,10 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     // ---- PRIVATE VC THREAD HANDLING ----
     if (isPrivateVC && settings.privateThreadAlerts) {
       let thread = activeVCThreads.get(vc.id);
-
-      // Reuse existing or create new private thread
-      if (!thread || thread.archived || !thread.id) {
+    
+      // Reuse or recreate thread if missing/deleted
+      const threadValid = thread && !thread.archived && thread.id && logChannel.threads.cache.has(thread.id);
+      if (!threadValid) {
         try {
           thread = await logChannel.threads.create({
             name: `🔊 ${vc.name} | VC Alerts`,
@@ -742,13 +743,12 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
           return;
         }
       }
-
-      // Reset inactivity timer — delete thread after 5 min of no joins/leaves
+    
+      // Reset inactivity timer (delete after 5 min)
       if (threadDeletionTimeouts.has(vc.id)) {
         clearTimeout(threadDeletionTimeouts.get(vc.id));
         threadDeletionTimeouts.delete(vc.id);
       }
-
       const timeoutId = setTimeout(async () => {
         try {
           await thread.delete().catch(() => {});
@@ -758,24 +758,54 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         threadDeletionTimeouts.delete(vc.id);
       }, THREAD_INACTIVITY_MS);
       threadDeletionTimeouts.set(vc.id, timeoutId);
-
-      // Add visible members to thread
+    
+      // 🧩 Add members first (IIFE)
       (async () => {
         try {
           const members = await vc.guild.members.fetch();
           const visible = members.filter(m => !m.user.bot && vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel));
-          for (const m of visible.values()) thread.members.add(m.id).catch(() => {});
-        } catch {}
+          for (const m of visible.values()) {
+            if (!thread.members.cache.has(m.id)) {
+              thread.members.add(m.id).catch(() => {});
+            }
+          }
+        } catch (err) {
+          console.warn(`[VC Thread] ⚠️ Failed to add members for ${vc.name}:`, err.message);
+        }
       })();
-
-      // ⚡ Send join/leave alert
+    
+      // ⚡ Send alert (IIFE)
       (async () => {
         try {
           const msg = await thread.send({ embeds: [embed] });
           if (msg && settings.autoDelete)
             setTimeout(() => msg.delete().catch(() => {}), 30_000);
         } catch (err) {
-          console.warn(`[VC Thread] ⚠️ Failed to send in ${vc.name}:`, err.message);
+          // Recreate thread if it was deleted manually
+          if (err.message?.includes("Unknown Channel") || err.message?.includes("Missing Access")) {
+            console.warn(`[VC Thread] ⚠️ Thread missing for ${vc.name}, recreating...`);
+            activeVCThreads.delete(vc.id);
+            try {
+              const newThread = await logChannel.threads.create({
+                name: `🔊 ${vc.name} | VC Alerts`,
+                autoArchiveDuration: 1440,
+                type: ChannelType.PrivateThread,
+                reason: `Recreated thread for ${vc.name}`,
+              });
+              activeVCThreads.set(vc.id, newThread);
+    
+              // Re-add members quickly
+              const members = await vc.guild.members.fetch();
+              const visible = members.filter(m => !m.user.bot && vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel));
+              for (const m of visible.values()) newThread.members.add(m.id).catch(() => {});
+    
+              await newThread.send({ embeds: [embed] }).catch(() => {});
+            } catch (e2) {
+              console.error(`[VC Thread] ❌ Failed to recreate thread for ${vc.name}:`, e2.message);
+            }
+          } else {
+            console.warn(`[VC Thread] ⚠️ Failed to send in ${vc.name}:`, err.message);
+          }
         }
       })();
     }
