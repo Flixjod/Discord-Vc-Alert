@@ -596,14 +596,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             // Update main control panel message (visible to everyone)
             await interaction.update({
               embeds: [panel.embed],
-              components: panel.buttons,
+              components: [panel.buttons],
             });
 
             await interaction.followUp({
-              content: "✅ Your VC alert settings have been **reset to default** successfully!",
+              content: "🎉 **VC Alert Settings Reset!**\nAll settings have been restored to their default values. ✅",
               ephemeral: true,
             });
-        
+
           } catch (e) {
             console.error(`[RESET ERROR] ${e?.message || e}`);
             await interaction.followUp({
@@ -620,13 +620,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
           await interaction.update({
             embeds: [panel.embed],
-            components: panel.buttons,
+            components: [panel.buttons],
           });
-        
-          await interaction.followUp({
-            content: "❌ Reset canceled — no changes were made.",
-            ephemeral: true,
-          });
+
           break;
         }
         default:
