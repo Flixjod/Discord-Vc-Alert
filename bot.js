@@ -723,8 +723,10 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       const threadValid = thread && !thread.archived && thread.id && logChannel.threads.cache.has(thread.id);
       if (!threadValid) {
         try {
+          const Vc_Name = vc.name.length > 25 ? vc.name.slice(0, 25) + "…" : vc.name;
+
           thread = await logChannel.threads.create({
-            name: `🔊│${formattedName} • Vc-Alerts`,
+            name: `🔊│${Vc_Name} • Vc-Alerts`,
             autoArchiveDuration: 1440, // 24 hours
             type: ChannelType.PrivateThread,
             reason: `Private VC alert thread for ${vc.name}`,
