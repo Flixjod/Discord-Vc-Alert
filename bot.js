@@ -609,7 +609,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
               }),
               panel.embed // Show full updated panel immediately below message
             ],
-            components: panel.buttons
+            components: [
+              ...panel.buttons,
+            ],
           });
         }
         
@@ -629,7 +631,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
               }),
               panel.embed // Show full panel like original
             ],
-            components: panel.buttons
+            components: [
+              ...panel.buttons,
+            ],
           });
         }
         default:
