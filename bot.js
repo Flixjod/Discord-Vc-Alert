@@ -583,58 +583,51 @@ client.on(Events.InteractionCreate, async (interaction) => {
             components: [confirmRow]
           });
         }
-        
         case "confirmReset": {
-          // Delete existing settings
-          await GuildSettings.deleteOne({ guildId }).catch(e =>
-            console.error(`[DB] Reset delete failed for ${guildId}:`, e?.message ?? e)
-          );
-          guildSettingsCache.delete(guildId);
+          try {
+            // Delete existing settings
+            await GuildSettings.deleteOne({ guildId });
+            guildSettingsCache.delete(guildId);
         
-          // Recreate default settings
-          const newSettings = await getGuildSettings(guildId);
+            // Recreate default settings
+            const newSettings = await getGuildSettings(guildId);
+            const panel = buildControlPanel(newSettings, guild);
         
-          // Rebuild full control panel like normal
-          const panel = buildControlPanel(newSettings, guild);
+            // Update main control panel message (visible to everyone)
+            await interaction.update({
+              embeds: [panel.embed],
+              components: panel.buttons,
+            });
+
+            await interaction.followUp({
+              content: "✅ Your VC alert settings have been **reset to default** successfully!",
+              ephemeral: true,
+            });
         
-          return interaction.update({
-            embeds: [
-              makeEmbed({
-                title: "✅ Settings Reset!",
-                description:
-                  "All VC alert settings have been restored to **default**. ✨\n" +
-                  "You can now use the control panel below to configure your alerts again.",
-                color: EmbedColors.RESET,
-                guild,
-              }),
-              panel.embed // Show full updated panel immediately below message
-            ],
-            components: [
-              ...panel.buttons,
-            ],
-          });
+          } catch (e) {
+            console.error(`[RESET ERROR] ${e?.message || e}`);
+            await interaction.followUp({
+              content: "❌ Something went wrong while resetting. Please try again later.",
+              ephemeral: true,
+            });
+          }
+          break;
         }
-        
+  
         case "cancelReset": {
-          // Rebuild full panel without changes
           const currentSettings = await getGuildSettings(guildId);
           const panel = buildControlPanel(currentSettings, guild);
         
-          return interaction.update({
-            embeds: [
-              makeEmbed({
-                title: "❌ Reset Canceled",
-                description:
-                  "No changes were made. 🛡️\nYou can continue configuring your VC alerts normally.",
-                color: EmbedColors.RESET,
-                guild,
-              }),
-              panel.embed // Show full panel like original
-            ],
-            components: [
-              ...panel.buttons,
-            ],
+          await interaction.update({
+            embeds: [panel.embed],
+            components: panel.buttons,
           });
+        
+          await interaction.followUp({
+            content: "❌ Reset canceled — no changes were made.",
+            ephemeral: true,
+          });
+          break;
         }
         default:
           break;
