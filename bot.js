@@ -823,7 +823,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
       .setFooter({ text: toSmallCaps("✨ Ready to vibe!"), iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
 
-    await addLog("online", member.user.tag, member.guild);
+    await addLog("online", member.user.tag, "-", member.guild);
     const msg = await channel.send({ embeds: [embed] }).catch(e => console.warn(`Failed to send online alert for ${member.user.username}:`, e?.message ?? e));
     if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
   } catch (e) {
