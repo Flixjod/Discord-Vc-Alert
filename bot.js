@@ -741,7 +741,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
             type: ChannelType.PrivateThread,
             reason: `Private VC alert thread for ${vc.name}`,
           });
-        m activeVCThreads.set(vc.id, thread);
+          activeVCThreads.set(vc.id, thread);
           console.log(`[VC Thread] 🧵 Created new private thread for ${vc.name}`);
         } catch (err) {
           console.error(`[VC Alert] ❌ Failed to create thread for ${vc.name}:`, err.message);
