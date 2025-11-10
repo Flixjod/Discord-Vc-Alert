@@ -1,18 +1,30 @@
 {
-  "name": "flix-vc-alert",
+  "name": "discord-vc-alert-bot",
   "version": "1.0.0",
+  "description": "A Discord bot for VC alerts and soundboard functionality.",
   "main": "bot.js",
   "type": "module",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "engines": {
-    "node": ">=20.0.0"
-  },
+  "keywords": [
+    "discord",
+    "bot",
+    "voice",
+    "alert",
+    "soundboard"
+  ],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
+    "@discordjs/voice": "^0.16.1",
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0",
+    "libsodium-wrappers": "^0.7.13",
+    "mongodb": "^6.5.0",
     "mongoose": "^8.3.2"
   }
 }
