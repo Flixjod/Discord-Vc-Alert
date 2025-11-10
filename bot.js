@@ -1,6 +1,6 @@
 import express from "express";
 import fs from "fs";
-// const fsp = fs.promises; // <- REMOVED
+// const fsp = fs.promises; // <- No longer needed
 import path from "path";
 import { fileURLToPath } from "url";
 import {
@@ -29,7 +29,7 @@ import {
   StreamType
 } from "@discordjs/voice";
 import mongoose from "mongoose";
-// import { GridFSBucket } from "mongodb"; // <- REMOVED
+// import { GridFSBucket } from "mongodb"; // <- No longer needed
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -52,9 +52,7 @@ const __dirname = path.dirname(__filename);
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;
 const LOGS_DIR = path.join(__dirname, "logs");
-// const SOUNDS_DIR = path.join(__dirname, "sounds"); // <- REMOVED
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
-// if (!fs.existsSync(SOUNDS_DIR)) fs.mkdirSync(SOUNDS_DIR, { recursive: true }); // <- REMOVED
 const MAX_SOUND_SIZE_MB = 5; // We can still keep this check
 const SOUNDS_PER_PAGE = 15;
 
@@ -128,11 +126,11 @@ logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 }); // auto
 logSchema.index({ guildId: 1, time: -1 });
 const GuildLog = mongoose.model("GuildLog", logSchema);
 
-// --- Soundboard Schema (UPDATED) ---
+// --- Soundboard Schema (Stores URL) ---
 const soundboardSoundSchema = new mongoose.Schema({
   guildId: { type: String, required: true, index: true },
   name: { type: String, required: true },
-  url: { type: String, required: true }, // <- CHANGED: Stores the Discord CDN URL
+  url: { type: String, required: true }, // Stores the Discord CDN URL or external URL
   uploaderId: { type: String, required: true },
   createdAt: { type: Date, default: Date.now }
 });
@@ -229,7 +227,8 @@ async function generateActivityFile(guild, logs) {
     return `${emoji} ${l.type === "join" ? "ᴊᴏɪɴ" : l.type === "leave" ? "ʟᴇᴀᴠᴇ" : "ᴏɴʟɪɴᴇ"} — ${l.user} ${action} ${l.channel}
   🕒 ${ago} • ${toISTString(l.time)}\n`;
   }).join("\n");
-  await fsp.writeFile(filePath, header + body, "utf8");
+  // We need fsp for this one function
+  await fs.promises.writeFile(filePath, header + body, "utf8");
   return filePath;
 }
 
@@ -452,7 +451,7 @@ const commands = [
         { name: "🗓️ Last 30 days", value: "30days" }
       ))
     .addUserOption(opt => opt.setName("user").setDescription("Select a user to view their logs").setRequired(false)),
-  // --- Soundboard Commands ---
+  // --- Soundboard Commands (UPDATED) ---
   new SlashCommandBuilder()
     .setName("soundboard")
     .setDescription("SOUNDBOARD 🔊 ᴏᴘᴇɴ ᴛʜᴇ sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ (ᴀᴅᴍɪɴ ᴏɴʟʏ)"),
@@ -465,8 +464,12 @@ const commands = [
       .setRequired(true))
     .addAttachmentOption(opt => opt
       .setName("file")
-      .setDescription("ᴛʜᴇ ᴀᴜᴅɪᴏ ғɪʟᴇ (ᴍᴀx 5ᴍʙ)")
-      .setRequired(true))
+      .setDescription("ᴛʜᴇ ᴀᴜᴅɪᴏ ғɪʟᴇ ᴏʀ ᴀ ᴠᴏɪᴄᴇ ᴍᴇssᴀɢᴇ (ᴍᴀx 5ᴍʙ)")
+      .setRequired(false)) // <- No longer required
+    .addStringOption(opt => opt
+      .setName("link")
+      .setDescription("ᴀ ᴅɪʀᴇᴄᴛ ʟɪɴᴋ ᴛᴏ ᴀ sᴏᴜɴᴅ ғɪʟᴇ (ᴍᴘ3, ᴏɢɢ, ᴡᴀᴠ)")
+      .setRequired(false)) // <- New option
 ].map(c => c.toJSON());
 
 // ---------- Ready & register commands ----------
@@ -671,7 +674,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const range = interaction.options.getString("range");
           const user = interaction.options.getUser("user");
           
-          // TODO: Implement actual filtering
+          // TODO: Implement actual filtering based on range/user
           const logs = await GuildLog.find({ guildId: guild.id }).sort({ time: -1 }).limit(20).lean();
         
           if (logs.length === 0) {
@@ -716,28 +719,55 @@ client.on(Events.InteractionCreate, async (interaction) => {
           
           const name = interaction.options.getString("name").toLowerCase().replace(/[^a-z0-9_]/g, '-').slice(0, 30);
           const file = interaction.options.getAttachment("file");
+          const link = interaction.options.getString("link");
           
-          // Validation
+          // --- Validation ---
+          if (!file && !link) {
+            return interaction.editReply({ embeds: [makeEmbed({ title: "No Source Provided", description: "you must provide either a `file` attachment or a `link`.", color: EmbedColors.ERROR, guild })] });
+          }
+          if (file && link) {
+             return interaction.editReply({ embeds: [makeEmbed({ title: "Too Many Sources", description: "please provide *either* a `file` or a `link`, not both.", color: EmbedColors.ERROR, guild })] });
+          }
+
           const existing = await SoundboardSound.findOne({ guildId, name });
           if (existing) {
             return interaction.editReply({ embeds: [makeEmbed({ title: "Name Taken", description: `a sound named \`${name}\` already exists. please choose a different name or delete the old one.`, color: EmbedColors.ERROR, guild })] });
           }
           
-          const allowedTypes = ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/opus'];
-          if (!file.contentType || !allowedTypes.includes(file.contentType)) {
-            return interaction.editReply({ embeds: [makeEmbed({ title: "Invalid File Type", description: `this file type (${file.contentType}) is not supported.\nplease upload an \`mp3\`, \`ogg\`, \`wav\`, or \`voice message\`.`, color: EmbedColors.ERROR, guild })] });
+          let soundUrl;
+
+          // --- File Logic ---
+          if (file) {
+            const allowedTypes = ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/opus'];
+            if (!file.contentType || !allowedTypes.includes(file.contentType)) {
+              return interaction.editReply({ embeds: [makeEmbed({ title: "Invalid File Type", description: `this file type (${file.contentType}) is not supported.\nplease upload an \`mp3\`, \`ogg\`, \`wav\`, or a \`voice message (opus)\`.`, color: EmbedColors.ERROR, guild })] });
+            }
+            
+            if (file.size > MAX_SOUND_SIZE_MB * 1024 * 1024) {
+              return interaction.editReply({ embeds: [makeEmbed({ title: "File Too Large", description: `this file is too large (${(file.size / 1024 / 1024).toFixed(2)}mb).\nthe limit is \`${MAX_SOUND_SIZE_MB}mb\`.`, color: EmbedColors.ERROR, guild })] });
+            }
+            soundUrl = file.url;
           }
           
-          if (file.size > MAX_SOUND_SIZE_MB * 1024 * 1024) {
-            return interaction.editReply({ embeds: [makeEmbed({ title: "File Too Large", description: `this file is too large (${(file.size / 1024 / 1024).toFixed(2)}mb).\nthe limit is \`${MAX_SOUND_SIZE_MB}mb\`.`, color: EmbedColors.ERROR, guild })] });
+          // --- Link Logic ---
+          if (link) {
+            try {
+              const url = new URL(link); // Check if it's a valid URL structure
+              if (!/\.(mp3|ogg|wav)$/i.test(url.pathname)) {
+                 return interaction.editReply({ embeds: [makeEmbed({ title: "Invalid Link", description: "the link does not seem to be a direct audio file. it must end in `.mp3`, `.ogg`, or `.wav`.", color: EmbedColors.ERROR, guild })] });
+              }
+              soundUrl = link;
+            } catch (e) {
+              return interaction.editReply({ embeds: [makeEmbed({ title: "Invalid Link", description: "that doesn't look like a valid url. please provide a direct link to a sound file.", color: EmbedColors.ERROR, guild })] });
+            }
           }
-          
+
+          // --- Save to DB ---
           try {
-            // Save the URL directly. Discord hosts the file.
             await SoundboardSound.create({
               guildId,
               name,
-              url: file.url, // <- THE KEY CHANGE
+              url: soundUrl,
               uploaderId: interaction.user.id
             });
             
@@ -764,7 +794,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
       const customId = interaction.customId;
 
-      // --- NEW: Soundboard Button Handler ---
+      // --- Soundboard Button Handler ---
       if (customId.startsWith('sound_')) {
         // --- Play Sound (UPDATED) ---
         if (customId.startsWith('sound_play_')) {
@@ -773,21 +803,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const voiceChannel = member.voice.channel;
           
           if (!voiceChannel) {
-            return interaction.followUp({ embeds: [makeEmbed({ title: "No VC Detected", description: "you must be in a voice channel to play a sound.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+            return interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps("No VC Detected"), description: toSmallCaps("you must be in a voice channel to play a sound."), color: EmbedColors.ERROR, guild })], ephemeral: true });
           }
           
           const sound = await SoundboardSound.findById(soundId).lean();
           if (!sound) {
-            return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: "could not find that sound. it may have been deleted.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+             await interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps("Error"), description: toSmallCaps("could not find that sound. it may have been deleted."), color: EmbedColors.ERROR, guild })], ephemeral: true });
+             // Refresh the panel since the sound is gone
+             const panel = await buildSoundboardPanel(guild, 0, false);
+             return interaction.editReply(panel);
           }
           
           try {
-            // No local file check needed
             let connection = getVoiceConnection(guild.id);
+            
+            // --- NEW/UPDATED CHECK: Bot is busy in another channel ---
             if (connection && connection.joinConfig.channelId !== voiceChannel.id) {
-              connection.destroy();
-              connection = null;
+              return interaction.followUp({ 
+                  embeds: [makeEmbed({ 
+                      title: toSmallCaps("⚠️ ʙᴏᴛ ɪs ʙᴜsʏ"), 
+                      description: toSmallCaps(`i'm already playing sounds in <#${connection.joinConfig.channelId}>.\n\nplease wait until i'm free or join that channel to play sounds.`), 
+                      color: EmbedColors.ERROR, 
+                      guild 
+                  })], 
+                  ephemeral: true 
+              });
             }
+            
+            // If bot is not busy, or is already in the user's channel, proceed.
             if (!connection) {
               connection = joinVoiceChannel({
                 channelId: voiceChannel.id,
@@ -797,7 +840,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             const player = createAudioPlayer();
-            // Create resource directly from the URL
+            // Create resource directly from the URL (works for Discord CDN or external links)
             const resource = createAudioResource(sound.url); 
             
             connection.subscribe(player);
@@ -819,14 +862,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             
             player.on('error', (e) => {
               console.error(`[AudioPlayer Error] ${e.message}`);
-              interaction.followUp({ embeds: [makeEmbed({ title: "Playback Error", description: `failed to play \`${sound.name}\`: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
+              interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps("Playback Error"), description: toSmallCaps(`failed to play \`${sound.name}\`: \`${e.message}\`\n\nif this is a link, it might be broken or private.`), color: EmbedColors.ERROR, guild })], ephemeral: true });
             });
             
-            return interaction.followUp({ embeds: [makeEmbed({ title: `▶️ Playing Sound`, description: `now playing \`${sound.name}\` in ${voiceChannel}`, color: EmbedColors.SOUND, guild })], ephemeral: true });
+            return interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps(`▶️ Playing Sound`), description: toSmallCaps(`now playing \`${sound.name}\` in ${voiceChannel}`), color: EmbedColors.SOUND, guild })], ephemeral: true });
             
           } catch (e) {
              console.error("[Sound Play Error]", e);
-            return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: `failed to play sound: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
+            return interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps("Error"), description: toSmallCaps(`failed to play sound: \`${e.message}\``), color: EmbedColors.ERROR, guild })], ephemeral: true });
           }
         }
         
@@ -836,13 +879,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const soundId = customId.split('_')[2];
             const sound = await SoundboardSound.findById(soundId).lean();
             if (!sound) {
-              return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: "this sound no longer exists.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+              return interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps("Error"), description: toSmallCaps("this sound no longer exists."), color: EmbedColors.ERROR, guild })], ephemeral: true });
             }
             
             const confirmEmbed = new EmbedBuilder()
               .setColor(EmbedColors.ERROR)
               .setTitle(toSmallCaps("⚠️ ᴀʀᴇ ʏᴏᴜ sᴜʀᴇ?"))
-              .setDescription(toSmallCaps(`this will permanently delete the sound \`${sound.name}\`.\nthis action cannot be undone.`)); // Updated description
+              .setDescription(toSmallCaps(`this will permanently delete the sound \`${sound.name}\`.\nthis action cannot be undone.`));
               
             const confirmRow = new ActionRowBuilder().addComponents(
               new ButtonBuilder()
@@ -858,26 +901,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         }
         
-        // --- Confirm Deletion (UPDATED) ---
+        // --- Confirm Deletion ---
         if (customId.startsWith('sound_delete_confirm_')) {
           const soundId = customId.split('_')[3];
           try {
             const sound = await SoundboardSound.findById(soundId);
             if (!sound) throw new Error("Sound already deleted.");
             
-            // No local file to delete
-            
-            // Delete from Mongo
+            // Just delete from Mongo
             await SoundboardSound.deleteOne({ _id: soundId });
             
-            interaction.followUp({ embeds: [makeEmbed({ title: "✅ Sound Deleted", description: `\`${sound.name}\` has been permanently removed.`, color: EmbedColors.SUCCESS, guild })], ephemeral: true });
+            interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps("✅ Sound Deleted"), description: toSmallCaps(`\`${sound.name}\` has been permanently removed.`), color: EmbedColors.SUCCESS, guild })], ephemeral: true });
             
             const panel = await buildSoundboardPanel(guild, 0, true); // Rebuild delete panel on page 0
             return interaction.update(panel);
             
           } catch (e) {
             console.error("[Sound Delete Error]", e);
-            interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: `failed to delete sound: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
+            interaction.followUp({ embeds: [makeEmbed({ title: toSmallCaps("Error"), description: toSmallCaps(`failed to delete sound: \`${e.message}\``), color: EmbedColors.ERROR, guild })], ephemeral: true });
             const panel = await buildSoundboardPanel(guild, 0, true);
             return interaction.update(panel);
           }
@@ -931,11 +972,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.followUp({ content: "Panel refreshed!", ephemeral: true });
           return interaction.update(panel);
         }
+        // --- Updated 'Add' button message ---
         if (customId === 'sound_add_new') {
           return interaction.followUp({
             embeds: [makeEmbed({
-              title: "➕ ᴀᴅᴅ ᴀ ɴᴇᴡ sᴏᴜɴᴅ",
-              description: "please use the `/addsound` command to upload a new sound file.",
+              title: toSmallCaps("➕ ᴀᴅᴅ ᴀ ɴᴇᴡ sᴏᴜɴᴅ"),
+              description: toSmallCaps("to add a sound, use the `/addsound` command.\n\nyou can either attach a `file` (or voice message) or provide a direct `link` to a sound."),
               color: EmbedColors.INFO,
               guild
             })],
@@ -1314,8 +1356,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);
 });
 
-// ---------- Connect to MongoDB and login (UPDATED) ----------
-// let bucket; // <- REMOVED
+// ---------- Connect to MongoDB and login ----------
 (async () => {
   try {
     if (!process.env.MONGO_URI) throw new Error("MONGO_URI not provided in .env");
@@ -1323,9 +1364,6 @@ process.on('unhandledRejection', (reason) => {
       dbName: "Discord-Alert-Bot"
     });
     console.log("✅ MongoDB Connected to DB");
-    
-    // --- GridFS logic removed ---
-
   } catch (e) {
     console.error("❌ MongoDB connection error:", e?.message ?? e);
     process.exit(1);
