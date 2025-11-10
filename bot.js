@@ -1,6 +1,6 @@
 import express from "express";
 import fs from "fs";
-const fsp = fs.promises;
+// const fsp = fs.promises; // <- REMOVED
 import path from "path";
 import { fileURLToPath } from "url";
 import {
@@ -18,9 +18,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   Events,
-  AttachmentBuilder,
-  StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder
+  AttachmentBuilder
 } from "discord.js";
 import {
   joinVoiceChannel,
@@ -31,7 +29,7 @@ import {
   StreamType
 } from "@discordjs/voice";
 import mongoose from "mongoose";
-import { GridFSBucket } from "mongodb";
+// import { GridFSBucket } from "mongodb"; // <- REMOVED
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -54,8 +52,11 @@ const __dirname = path.dirname(__filename);
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;
 const LOGS_DIR = path.join(__dirname, "logs");
+// const SOUNDS_DIR = path.join(__dirname, "sounds"); // <- REMOVED
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
-const MAX_SOUND_SIZE_MB = 5;
+// if (!fs.existsSync(SOUNDS_DIR)) fs.mkdirSync(SOUNDS_DIR, { recursive: true }); // <- REMOVED
+const MAX_SOUND_SIZE_MB = 5; // We can still keep this check
+const SOUNDS_PER_PAGE = 15;
 
 // ---------- Small-caps utility ----------
 const SMALL_CAPS_MAP = {
@@ -127,15 +128,15 @@ logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 }); // auto
 logSchema.index({ guildId: 1, time: -1 });
 const GuildLog = mongoose.model("GuildLog", logSchema);
 
-// --- Soundboard Schema ---
+// --- Soundboard Schema (UPDATED) ---
 const soundboardSoundSchema = new mongoose.Schema({
   guildId: { type: String, required: true, index: true },
   name: { type: String, required: true },
-  fileId: { type: mongoose.Schema.Types.ObjectId, required: true }, // GridFS file ID
+  url: { type: String, required: true }, // <- CHANGED: Stores the Discord CDN URL
   uploaderId: { type: String, required: true },
   createdAt: { type: Date, default: Date.now }
 });
-soundboardSoundSchema.index({ guildId: 1, name: 1 }, { unique: true }); // One sound per name per guild
+soundboardSoundSchema.index({ guildId: 1, name: 1 }, { unique: true });
 const SoundboardSound = mongoose.model("SoundboardSound", soundboardSoundSchema);
 
 // ---------- In-memory caches & debounced writer ----------
@@ -311,6 +312,113 @@ function buildControlPanel(settings, guild) {
   return { embed, buttons: [row1, row2] };
 }
 
+// ---------- Soundboard Panel Builder ----------
+async function buildSoundboardPanel(guild, page, isDeleteMode) {
+  const totalSounds = await SoundboardSound.countDocuments({ guildId: guild.id });
+  const totalPages = Math.ceil(totalSounds / SOUNDS_PER_PAGE) || 1;
+  const currentPage = Math.min(Math.max(page, 0), totalPages - 1); // Clamp page number
+
+  const sounds = await SoundboardSound.find({ guildId: guild.id })
+    .sort({ name: 1 })
+    .skip(currentPage * SOUNDS_PER_PAGE)
+    .limit(SOUNDS_PER_PAGE)
+    .lean();
+
+  const embed = new EmbedBuilder()
+    .setColor(isDeleteMode ? EmbedColors.ERROR : EmbedColors.SOUND)
+    .setAuthor({
+      name: toSmallCaps(isDeleteMode ? "❌ ᴅᴇʟᴇᴛᴇ ᴍᴏᴅᴇ ❌" : "🔊 sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ"),
+      iconURL: guild.iconURL() || client.user.displayAvatarURL()
+    })
+    .setDescription(toSmallCaps(
+      isDeleteMode
+      ? "click any red sound button below to delete it.\nthis is permanent! click 'cancel' to exit."
+      : "click a button to play a sound in your vc.\nuse the controls to navigate or delete sounds."
+    ))
+    .setFooter({ text: toSmallCaps(`ᴘᴀɢᴇ ${currentPage + 1} / ${totalPages} • ${totalSounds} ᴛᴏᴛᴀʟ sᴏᴜɴᴅs`) });
+
+  const components = [];
+  let buttonRows = [];
+  
+  // Create sound buttons (up to 3 rows of 5)
+  if (sounds.length > 0) {
+    let currentRow = new ActionRowBuilder();
+    for (const sound of sounds) {
+      if (currentRow.components.length === 5) {
+        buttonRows.push(currentRow);
+        currentRow = new ActionRowBuilder();
+      }
+      currentRow.addComponents(
+        new ButtonBuilder()
+          .setCustomId(isDeleteMode ? `sound_delete_${sound._id}` : `sound_play_${sound._id}`)
+          .setLabel(sound.name.slice(0, 80)) // Button labels have 80 char limit
+          .setStyle(isDeleteMode ? ButtonStyle.Danger : ButtonStyle.Secondary)
+      );
+    }
+    buttonRows.push(currentRow); // Add the last row
+  }
+  
+  components.push(...buttonRows);
+
+  // Pagination Row
+  const pageRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`sound_page_first_${isDeleteMode}`)
+      .setLabel("«")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(currentPage === 0),
+    new ButtonBuilder()
+      .setCustomId(`sound_page_prev_${currentPage}_${isDeleteMode}`)
+      .setLabel("‹")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(currentPage === 0),
+    new ButtonBuilder()
+      .setCustomId("sound_page_info")
+      .setLabel(`Page ${currentPage + 1}/${totalPages}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(`sound_page_next_${currentPage}_${isDeleteMode}`)
+      .setLabel("›")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(currentPage >= totalPages - 1),
+    new ButtonBuilder()
+      .setCustomId(`sound_page_last_${totalPages - 1}_${isDeleteMode}`)
+      .setLabel("»")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(currentPage >= totalPages - 1)
+  );
+  components.push(pageRow);
+
+  // Action Row
+  const actionRow = new ActionRowBuilder().addComponents(
+    isDeleteMode
+      ? new ButtonBuilder()
+          .setCustomId(`sound_cancel_delete_${currentPage}`)
+          .setLabel("ᴄᴀɴᴄᴇʟ ᴅᴇʟᴇᴛᴇ ᴍᴏᴅᴇ")
+          .setStyle(ButtonStyle.Secondary)
+      : new ButtonBuilder()
+          .setCustomId(`sound_toggle_delete_${currentPage}`)
+          .setLabel("ᴅᴇʟᴇᴛᴇ ᴀ sᴏᴜɴᴅ")
+          .setEmoji("❌")
+          .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId("sound_add_new")
+      .setLabel("ᴀᴅᴅ sᴏᴜɴᴅ")
+      .setEmoji("➕")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`sound_refresh_${currentPage}_${isDeleteMode}`)
+      .setLabel("ʀᴇғʀᴇsʜ")
+      .setEmoji("🔄")
+      .setStyle(ButtonStyle.Primary)
+  );
+  components.push(actionRow);
+
+  return { embeds: [embed], components, ephemeral: true };
+}
+
+
 // ---------- Slash commands ----------
 const commands = [
   new SlashCommandBuilder()
@@ -383,14 +491,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // Chat input commands
     if (interaction.isChatInputCommand()) {
-      let settings = await getGuildSettings(guildId);
-      // UPDATED: Admin check for ALL slash commands
       if (!await checkAdmin(interaction)) return; 
 
       switch (interaction.commandName) {
         // ... [Existing cases: settings, activate, deactivate, setignorerole, resetignorerole, logs] ...
         // ⚙️ SETTINGS PANEL
         case "settings": {
+          let settings = await getGuildSettings(guildId);
           const panel = buildControlPanel(settings, guild);
           return interaction.reply({
             embeds: [panel.embed],
@@ -401,6 +508,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
         // 🚀 ACTIVATE VC ALERTS
         case "activate": {
+          let settings = await getGuildSettings(guildId);
           const selected = interaction.options.getChannel("channel");
           let channel = selected ?? (
             settings.textChannelId
@@ -485,6 +593,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
         // 🔕 DEACTIVATE VC ALERTS
         case "deactivate": {
+          let settings = await getGuildSettings(guildId);
           if (!settings.alertsEnabled) {
             return interaction.reply({
               embeds: [
@@ -517,6 +626,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
         // 🙈 SET IGNORED ROLE
         case "setignorerole": {
+          let settings = await getGuildSettings(guildId);
           const role = interaction.options.getRole("role");
           settings.ignoredRoleId = role.id;
           settings.ignoreRoleEnabled = true;
@@ -537,6 +647,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
         // 👀 RESET IGNORED ROLE
         case "resetignorerole": {
+          let settings = await getGuildSettings(guildId);
           settings.ignoredRoleId = null;
           settings.ignoreRoleEnabled = false;
           await updateGuildSettings(settings);
@@ -599,11 +710,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           break;
         }
 
-        // --- /addsound ---
+        // --- /addsound (UPDATED) ---
         case "addsound": {
-          if (!bucket) {
-            return interaction.reply({ embeds: [makeEmbed({ title: "Database Error", description: "GridFS is not initialized. Please try again later.", color: EmbedColors.ERROR, guild })], ephemeral: true });
-          }
           await interaction.deferReply({ ephemeral: true });
           
           const name = interaction.options.getString("name").toLowerCase().replace(/[^a-z0-9_]/g, '-').slice(0, 30);
@@ -625,27 +733,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
           
           try {
-            // Download file and upload to GridFS
-            const response = await fetch(file.url);
-            if (!response.ok || !response.body) {
-              throw new Error("Failed to download file from Discord.");
-            }
-            
-            const uploadStream = bucket.openUploadStream(file.filename, {
-              metadata: { guildId: guild.id, uploaderId: interaction.user.id, name: name, contentType: file.contentType }
-            });
-            
-            await new Promise((resolve, reject) => {
-              response.body.pipe(uploadStream)
-                .on('finish', resolve)
-                .on('error', reject);
-            });
-
-            // Save reference to Mongoose
+            // Save the URL directly. Discord hosts the file.
             await SoundboardSound.create({
               guildId,
               name,
-              fileId: uploadStream.id,
+              url: file.url, // <- THE KEY CHANGE
               uploaderId: interaction.user.id
             });
             
@@ -660,49 +752,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // --- /soundboard ---
         case "soundboard": {
           await interaction.deferReply({ ephemeral: true });
-          
-          const sounds = await SoundboardSound.find({ guildId }).limit(25).sort({ name: 1 }).lean();
-          
-          if (sounds.length === 0) {
-            return interaction.editReply({ embeds: [makeEmbed({ title: "Soundboard is Empty", description: "no sounds have been added yet!\nuse `/addsound <name> <file>` to add one.", color: EmbedColors.INFO, guild })] });
-          }
-
-          const embed = new EmbedBuilder()
-            .setColor(EmbedColors.SOUND)
-            .setAuthor({ name: toSmallCaps("🔊 Server Soundboard"), iconURL: guild.iconURL() || client.user.displayAvatarURL() })
-            .setDescription(toSmallCaps(sounds.length > 0 ? "select a sound to play or delete from the menus below." : "use `/addsound` to get started!"))
-            .setFooter({ text: toSmallCaps(`${sounds.length} sound(s) loaded • ${guild.name}`)})
-            .setTimestamp();
-            
-          const playOptions = sounds.map(s => 
-            new StringSelectMenuOptionBuilder()
-              .setLabel(s.name)
-              .setValue(`play_${s._id.toString()}`)
-              .setEmoji('▶️')
-          );
-          
-          const deleteOptions = sounds.map(s => 
-            new StringSelectMenuOptionBuilder()
-              .setLabel(s.name)
-              .setValue(`del_${s._id.toString()}`)
-              .setEmoji('❌')
-          );
-          
-          const playMenu = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId('soundboard_action')
-              .setPlaceholder(toSmallCaps('▶️ ᴘʟᴀʏ ᴀ sᴏᴜɴᴅ...'))
-              .setOptions(playOptions)
-          );
-          
-          const deleteMenu = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId('soundboard_admin')
-              .setPlaceholder(toSmallCaps('❌ ᴀᴅᴍɪɴ: ᴅᴇʟᴇᴛᴇ ᴀ sᴏᴜɴᴅ...'))
-              .setOptions(deleteOptions)
-          );
-          
-          return interaction.editReply({ embeds: [embed], components: [playMenu, deleteMenu] });
+          const panel = await buildSoundboardPanel(guild, 0, false);
+          return interaction.editReply(panel);
         }
       }
     }
@@ -711,12 +762,194 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       if (!await checkAdmin(interaction)) return;
       
-      await interaction.deferUpdate();
+      const customId = interaction.customId;
 
+      // --- NEW: Soundboard Button Handler ---
+      if (customId.startsWith('sound_')) {
+        // --- Play Sound (UPDATED) ---
+        if (customId.startsWith('sound_play_')) {
+          const soundId = customId.split('_')[2];
+          const member = interaction.member;
+          const voiceChannel = member.voice.channel;
+          
+          if (!voiceChannel) {
+            return interaction.followUp({ embeds: [makeEmbed({ title: "No VC Detected", description: "you must be in a voice channel to play a sound.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+          }
+          
+          const sound = await SoundboardSound.findById(soundId).lean();
+          if (!sound) {
+            return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: "could not find that sound. it may have been deleted.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+          }
+          
+          try {
+            // No local file check needed
+            let connection = getVoiceConnection(guild.id);
+            if (connection && connection.joinConfig.channelId !== voiceChannel.id) {
+              connection.destroy();
+              connection = null;
+            }
+            if (!connection) {
+              connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: guild.id,
+                adapterCreator: guild.voiceAdapterCreator,
+              });
+            }
+
+            const player = createAudioPlayer();
+            // Create resource directly from the URL
+            const resource = createAudioResource(sound.url); 
+            
+            connection.subscribe(player);
+            player.play(resource);
+            
+            if (voiceInactivityTimers.has(guild.id)) {
+              clearTimeout(voiceInactivityTimers.get(guild.id));
+              voiceInactivityTimers.delete(guild.id);
+            }
+            
+            player.on(AudioPlayerStatus.Idle, () => {
+              const timeout = setTimeout(() => {
+                const conn = getVoiceConnection(guild.id);
+                if (conn) conn.destroy();
+                voiceInactivityTimers.delete(guild.id);
+              }, 5 * 60 * 1000); // 5 minutes
+              voiceInactivityTimers.set(guild.id, timeout);
+            });
+            
+            player.on('error', (e) => {
+              console.error(`[AudioPlayer Error] ${e.message}`);
+              interaction.followUp({ embeds: [makeEmbed({ title: "Playback Error", description: `failed to play \`${sound.name}\`: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
+            });
+            
+            return interaction.followUp({ embeds: [makeEmbed({ title: `▶️ Playing Sound`, description: `now playing \`${sound.name}\` in ${voiceChannel}`, color: EmbedColors.SOUND, guild })], ephemeral: true });
+            
+          } catch (e) {
+             console.error("[Sound Play Error]", e);
+            return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: `failed to play sound: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
+          }
+        }
+        
+        // --- Show Delete Confirmation ---
+        if (customId.startsWith('sound_delete_')) {
+          if (!customId.startsWith('sound_delete_confirm_') && !customId.startsWith('sound_delete_cancel_')) {
+            const soundId = customId.split('_')[2];
+            const sound = await SoundboardSound.findById(soundId).lean();
+            if (!sound) {
+              return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: "this sound no longer exists.", color: EmbedColors.ERROR, guild })], ephemeral: true });
+            }
+            
+            const confirmEmbed = new EmbedBuilder()
+              .setColor(EmbedColors.ERROR)
+              .setTitle(toSmallCaps("⚠️ ᴀʀᴇ ʏᴏᴜ sᴜʀᴇ?"))
+              .setDescription(toSmallCaps(`this will permanently delete the sound \`${sound.name}\`.\nthis action cannot be undone.`)); // Updated description
+              
+            const confirmRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`sound_delete_confirm_${soundId}`)
+                .setLabel("Yes, Delete It")
+                .setStyle(ButtonStyle.Danger),
+              new ButtonBuilder()
+                .setCustomId(`sound_delete_cancel_${soundId}`)
+                .setLabel("No, Cancel")
+                .setStyle(ButtonStyle.Secondary)
+            );
+            return interaction.update({ embeds: [confirmEmbed], components: [confirmRow] });
+          }
+        }
+        
+        // --- Confirm Deletion (UPDATED) ---
+        if (customId.startsWith('sound_delete_confirm_')) {
+          const soundId = customId.split('_')[3];
+          try {
+            const sound = await SoundboardSound.findById(soundId);
+            if (!sound) throw new Error("Sound already deleted.");
+            
+            // No local file to delete
+            
+            // Delete from Mongo
+            await SoundboardSound.deleteOne({ _id: soundId });
+            
+            interaction.followUp({ embeds: [makeEmbed({ title: "✅ Sound Deleted", description: `\`${sound.name}\` has been permanently removed.`, color: EmbedColors.SUCCESS, guild })], ephemeral: true });
+            
+            const panel = await buildSoundboardPanel(guild, 0, true); // Rebuild delete panel on page 0
+            return interaction.update(panel);
+            
+          } catch (e) {
+            console.error("[Sound Delete Error]", e);
+            interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: `failed to delete sound: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
+            const panel = await buildSoundboardPanel(guild, 0, true);
+            return interaction.update(panel);
+          }
+        }
+        
+        // --- Cancel Deletion ---
+        if (customId.startsWith('sound_delete_cancel_')) {
+          const panel = await buildSoundboardPanel(guild, 0, true); // Go back to delete mode panel
+          return interaction.update(panel);
+        }
+
+        // --- Pagination ---
+        let page = 0;
+        let isDeleteMode = false;
+        if (customId.startsWith('sound_page_')) {
+          const parts = customId.split('_');
+          const action = parts[2];
+          isDeleteMode = parts[parts.length - 1] === 'true';
+          
+          if (action === 'first') {
+            page = 0;
+          } else if (action === 'last') {
+            page = parseInt(parts[3], 10);
+          } else if (action === 'prev') {
+            page = parseInt(parts[3], 10) - 1;
+          } else if (action === 'next') {
+            page = parseInt(parts[3], 10) + 1;
+          } else {
+            return; // It was 'sound_page_info'
+          }
+          const panel = await buildSoundboardPanel(guild, page, isDeleteMode);
+          return interaction.update(panel);
+        }
+        
+        // --- Panel Actions (Toggle Delete, Add, Refresh) ---
+        if (customId.startsWith('sound_toggle_delete_')) {
+          page = parseInt(customId.split('_')[3], 10);
+          const panel = await buildSoundboardPanel(guild, page, true); // Enable delete mode
+          return interaction.update(panel);
+        }
+        if (customId.startsWith('sound_cancel_delete_')) {
+          page = parseInt(customId.split('_')[3], 10);
+          const panel = await buildSoundboardPanel(guild, page, false); // Disable delete mode
+          return interaction.update(panel);
+        }
+        if (customId.startsWith('sound_refresh_')) {
+          const parts = customId.split('_');
+          page = parseInt(parts[2], 10);
+          isDeleteMode = parts[3] === 'true';
+          const panel = await buildSoundboardPanel(guild, page, isDeleteMode);
+          await interaction.followUp({ content: "Panel refreshed!", ephemeral: true });
+          return interaction.update(panel);
+        }
+        if (customId === 'sound_add_new') {
+          return interaction.followUp({
+            embeds: [makeEmbed({
+              title: "➕ ᴀᴅᴅ ᴀ ɴᴇᴡ sᴏᴜɴᴅ",
+              description: "please use the `/addsound` command to upload a new sound file.",
+              color: EmbedColors.INFO,
+              guild
+            })],
+            ephemeral: true
+          });
+        }
+        return; // Fallthrough
+      }
+      
+      // --- Original Settings Button Handler ---
+      await interaction.deferUpdate();
       let settingsToUpdate = await getGuildSettings(guildId); 
 
       switch (interaction.customId) {
-        // ... [Existing button cases] ...
         case "toggleLeaveAlerts":
           settingsToUpdate.leaveAlerts = !settingsToUpdate.leaveAlerts;
           break;
@@ -801,7 +1034,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
         default:
-          return;
+          // Unknown button, maybe from an old message
+          return interaction.followUp({ content: "This button is no longer active.", ephemeral: true });
       }
 
       await updateGuildSettings(settingsToUpdate);
@@ -809,119 +1043,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.editReply({ embeds: [updatedPanel.embed], components: updatedPanel.buttons });
     }
     
-    // --- Select Menu Handler ---
-    if (interaction.isStringSelectMenu()) {
-      // UPDATED: Admin check for ALL menu interactions (play and delete)
-      if (!await checkAdmin(interaction)) return;
-      
-      await interaction.deferUpdate(); // Acknowledge the interaction
-      
-      const [action, soundId] = interaction.values[0].split('_');
-      
-      if (!soundId) return; // Invalid value
-      
-      // --- Handle Sound Deletion (Admin) ---
-      if (interaction.customId === 'soundboard_admin' && action === 'del') {
-        // Admin check already passed above
-        try {
-          const sound = await SoundboardSound.findById(soundId);
-          if (!sound) {
-            return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: "this sound could not be found. it might have already been deleted.", color: EmbedColors.ERROR, guild })], ephemeral: true });
-          }
-          
-          await bucket.delete(sound.fileId); // Delete from GridFS
-          await SoundboardSound.deleteOne({ _id: soundId }); // Delete from Mongo
-          
-          await interaction.followUp({ embeds: [makeEmbed({ title: "✅ Sound Deleted", description: `\`${sound.name}\` has been permanently removed.`, color: EmbedColors.SUCCESS, guild })], ephemeral: true });
-          
-          // Refresh the panel
-          const sounds = await SoundboardSound.find({ guildId }).limit(25).sort({ name: 1 }).lean();
-          const embed = new EmbedBuilder()
-            .setColor(EmbedColors.SOUND)
-            .setAuthor({ name: toSmallCaps("🔊 Server Soundboard"), iconURL: guild.iconURL() || client.user.displayAvatarURL() })
-            .setDescription(toSmallCaps(sounds.length > 0 ? "select a sound to play or delete from the menus below." : "all sounds have been deleted!"))
-            .setFooter({ text: toSmallCaps(`${sounds.length} sound(s) loaded • ${guild.name}`)})
-            .setTimestamp();
-            
-          const playOptions = sounds.map(s => new StringSelectMenuOptionBuilder().setLabel(s.name).setValue(`play_${s._id.toString()}`).setEmoji('▶️'));
-          const deleteOptions = sounds.map(s => new StringSelectMenuOptionBuilder().setLabel(s.name).setValue(`del_${s._id.toString()}`).setEmoji('❌'));
-          
-          const playMenu = new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('soundboard_action').setPlaceholder(toSmallCaps('▶️ ᴘʟᴀʏ ᴀ sᴏᴜɴᴅ...')).setOptions(playOptions.length > 0 ? playOptions : [{label: 'empty', value: 'empty', emoji: '🕳️'}]).setDisabled(sounds.length === 0));
-          const deleteMenu = new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('soundboard_admin').setPlaceholder(toSmallCaps('❌ ᴀᴅᴍɪɴ: ᴅᴇʟᴇᴛᴇ ᴀ sᴏᴜɴᴅ...')).setOptions(deleteOptions.length > 0 ? deleteOptions : [{label: 'empty', value: 'empty', emoji: '🕳️'}]).setDisabled(sounds.length === 0));
-
-          return interaction.editReply({ embeds: [embed], components: [playMenu, deleteMenu] });
-          
-        } catch (e) {
-          console.error("[Sound Delete Error]", e);
-          return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: `failed to delete sound: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
-        }
-      }
-      
-      // --- Handle Sound Playing (Admin) ---
-      if (interaction.customId === 'soundboard_action' && action === 'play') {
-        // Admin check already passed above
-        const member = interaction.member;
-        const voiceChannel = member.voice.channel;
-        
-        if (!voiceChannel) {
-          return interaction.followUp({ embeds: [makeEmbed({ title: "No VC Detected", description: "you must be in a voice channel to play a sound.", color: EmbedColors.ERROR, guild })], ephemeral: true });
-        }
-        
-        const sound = await SoundboardSound.findById(soundId).lean();
-        if (!sound) {
-          return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: "could not find that sound. it may have been deleted.", color: EmbedColors.ERROR, guild })], ephemeral: true });
-        }
-        
-        try {
-          let connection = getVoiceConnection(guild.id);
-          
-          if (connection && connection.joinConfig.channelId !== voiceChannel.id) {
-            connection.destroy();
-            connection = null;
-          }
-
-          if (!connection) {
-            connection = joinVoiceChannel({
-              channelId: voiceChannel.id,
-              guildId: guild.id,
-              adapterCreator: guild.voiceAdapterCreator,
-            });
-          }
-
-          const player = createAudioPlayer();
-          const downloadStream = bucket.openDownloadStream(sound.fileId);
-          const resource = createAudioResource(downloadStream);
-          
-          connection.subscribe(player);
-          player.play(resource);
-          
-          if (voiceInactivityTimers.has(guild.id)) {
-            clearTimeout(voiceInactivityTimers.get(guild.id));
-            voiceInactivityTimers.delete(guild.id);
-          }
-          
-          player.on(AudioPlayerStatus.Idle, () => {
-            const timeout = setTimeout(() => {
-              const conn = getVoiceConnection(guild.id);
-              if (conn) conn.destroy();
-              voiceInactivityTimers.delete(guild.id);
-            }, 5 * 60 * 1000); // 5 minutes
-            voiceInactivityTimers.set(guild.id, timeout);
-          });
-          
-          player.on('error', (e) => {
-            console.error(`[AudioPlayer Error] ${e.message}`);
-            interaction.followUp({ embeds: [makeEmbed({ title: "Playback Error", description: `failed to play \`${sound.name}\`: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
-          });
-          
-          return interaction.followUp({ embeds: [makeEmbed({ title: `▶️ Playing Sound`, description: `now playing \`${sound.name}\` in ${voiceChannel}`, color: EmbedColors.SOUND, guild })], ephemeral: true });
-          
-        } catch (e) {
-           console.error("[Sound Play Error]", e);
-          return interaction.followUp({ embeds: [makeEmbed({ title: "Error", description: `failed to play sound: \`${e.message}\``, color: EmbedColors.ERROR, guild })], ephemeral: true });
-        }
-      }
-    }
 
   } catch (err) {
     console.error("[Interaction Handler] Error:", err?.stack ?? err?.message ?? err);
@@ -956,8 +1077,9 @@ async function fetchTextChannel(guild, channelId) {
 
 client.on("voiceStateUpdate", async (oldState, newState) => {
   try {
+    // --- VC Alert Logic ---
     const user = newState.member?.user ?? oldState.member?.user;
-    if (!user || user.bot) return;
+    if (!user || user.bot) return; // Ignore bots
 
     const guild = newState.guild ?? oldState.guild;
     if (!guild) return;
@@ -1008,7 +1130,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     const everyoneRole = vc.guild.roles.everyone;
     const isPrivateVC = everyoneRole ? !vc.permissionsFor(everyoneRole).has(PermissionsBitField.Flags.ViewChannel) : false;
 
-    // ---- PRIVATE VC THREAD HANDLING (Fast version for single server) ----
+    // ---- PRIVATE VC THREAD HANDLING ----
     if (isPrivateVC && settings.privateThreadAlerts) {
       let thread = activeVCThreads.get(vc.id);
     
@@ -1118,12 +1240,11 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   }
 });
 
-// ---------- Permission helper (UPDATED) ----------
+// ---------- Permission helper ----------
 async function checkAdmin(interaction) {
   const guild = interaction.guild;
   const member = interaction.member;
   
-  // Check for Admin or Manage Guild permissions
   const hasPermission =
     member?.permissions?.has(PermissionFlagsBits.Administrator) ||
     member?.permissions?.has(PermissionFlagsBits.ManageGuild);
@@ -1139,7 +1260,6 @@ async function checkAdmin(interaction) {
       ephemeral: true 
     };
     
-    // Reply or followUp depending on interaction state
     if (interaction.replied || interaction.deferred) {
         await interaction.followUp(replyPayload);
     } else {
@@ -1147,7 +1267,6 @@ async function checkAdmin(interaction) {
     }
     return false;
   }
-  // User has permission
   return true;
 }
 
@@ -1156,7 +1275,6 @@ async function checkAdmin(interaction) {
 async function shutdown(signal) {
   try {
     console.log(`[Shutdown] Received ${signal}. Cleaning up...`);
-    // Clear all voice connections
     client.guilds.cache.forEach(guild => {
       getVoiceConnection(guild.id)?.destroy();
     });
@@ -1196,8 +1314,8 @@ process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);
 });
 
-// ---------- Connect to MongoDB and login ----------
-let bucket; // GridFS bucket
+// ---------- Connect to MongoDB and login (UPDATED) ----------
+// let bucket; // <- REMOVED
 (async () => {
   try {
     if (!process.env.MONGO_URI) throw new Error("MONGO_URI not provided in .env");
@@ -1206,13 +1324,7 @@ let bucket; // GridFS bucket
     });
     console.log("✅ MongoDB Connected to DB");
     
-    // --- Initialize GridFS Bucket ---
-    mongoose.connection.once('open', () => {
-      bucket = new GridFSBucket(mongoose.connection.db, {
-        bucketName: 'soundboard'
-      });
-      console.log('✅ GridFS Bucket "soundboard" initialized.');
-    });
+    // --- GridFS logic removed ---
 
   } catch (e) {
     console.error("❌ MongoDB connection error:", e?.message ?? e);
