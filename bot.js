@@ -645,15 +645,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 
 
-// ---------- Voice state handling & thread management (v4: optimized) ----------
-const activeVCThreads = new Map(); // VC.id => thread
-const threadDeletionTimeouts = new Map(); // VC.id => timeout ID
-const THREAD_INACTIVITY_MS = 5 * 60 * 1000; // 5 minutes
+// ---------- Voice state handling & thread management (v8: clean functional) ----------
+const activeVCThreads = new Map();
+const threadDeletionTimeouts = new Map();
+const THREAD_INACTIVITY_MS = 5 * 60 * 1000; // 5 min
 
 async function fetchTextChannel(guild, channelId) {
   try {
-    let ch = guild.channels.cache.get(channelId) || await guild.channels.fetch(channelId).catch(() => null);
-    return (ch?.isTextBased()) ? ch : null;
+    const ch = await guild.channels.fetch(channelId).catch(() => null);
+    return ch?.isTextBased() ? ch : null;
   } catch {
     return null;
   }
@@ -671,16 +671,19 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     if (!settings?.alertsEnabled || !settings.textChannelId) return;
 
     const member = newState.member ?? oldState.member;
-    if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member?.roles?.cache?.has(settings.ignoredRoleId)) return;
+    if (
+      settings.ignoreRoleEnabled &&
+      settings.ignoredRoleId &&
+      member?.roles?.cache?.has(settings.ignoredRoleId)
+    )
+      return;
 
-    // Ignore VC switch (move)
-    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) return;
+    // Ignore moves between VCs
+    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId)
+      return;
 
     const logChannel = await fetchTextChannel(guild, settings.textChannelId);
-    if (!logChannel) {
-      console.error(`[VC Alert] ❌ Cannot fetch log channel ${settings.textChannelId} for ${guild.id}`);
-      return;
-    }
+    if (!logChannel) return;
 
     const avatar = user.displayAvatarURL({ dynamic: true });
     let embed;
@@ -719,30 +722,33 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     if (isPrivateVC && settings.privateThreadAlerts) {
       let thread = activeVCThreads.get(vc.id);
 
-      const valid = thread && !thread.archived && thread.id && logChannel.threads.cache.has(thread.id);
+      const valid = thread && !thread.archived && logChannel.threads.cache.has(thread.id);
       if (!valid) {
         try {
           const shortName = vc.name.length > 25 ? vc.name.slice(0, 25) + "…" : vc.name;
           thread = await logChannel.threads.create({
-            name: `🔊│${shortName} • Vc-Alerts`,
+            name: `🔊│${shortName} • VC-Alerts`,
             autoArchiveDuration: 1440,
             type: ChannelType.PrivateThread,
             reason: `Private VC alert thread for ${vc.name}`,
           });
           activeVCThreads.set(vc.id, thread);
-          console.log(`[VC Thread] 🧵 Created new private thread for ${vc.name}`);
+          console.log(`[VC Thread] 🧵 Created private thread for ${vc.name}`);
         } catch (err) {
-          console.error(`[VC Alert] ❌ Failed to create thread for ${vc.name}:`, err.message);
+          console.error(`[VC Thread] ❌ Failed to create thread for ${vc.name}:`, err.message);
           return;
         }
       }
+
+      // Ensure bot joined the thread
+      if (!thread.joined) await thread.join().catch(() => {});
 
       // Reset inactivity timer
       if (threadDeletionTimeouts.has(vc.id)) clearTimeout(threadDeletionTimeouts.get(vc.id));
       const timeoutId = setTimeout(async () => {
         try {
           await thread.delete().catch(() => {});
-          console.log(`[VC Thread] 🗑️ Deleted thread for ${vc.name} (inactive).`);
+          console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`);
         } catch {}
         activeVCThreads.delete(vc.id);
         threadDeletionTimeouts.delete(vc.id);
@@ -750,61 +756,30 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       threadDeletionTimeouts.set(vc.id, timeoutId);
 
       try {
-        // 🧩 Collect allowed members directly (no cache dependency)
-        const allowOverwrites = vc.permissionOverwrites.cache.filter(o =>
-          o.allow.has(PermissionsBitField.Flags.ViewChannel)
-        );
+        // --- Fetch all guild members ---
+        const allMembers = await guild.members.fetch();
 
-        const denyOverwrites = vc.permissionOverwrites.cache.filter(o =>
-          o.deny.has(PermissionsBitField.Flags.ViewChannel)
-        );
+        // --- Add everyone who can view this VC (even offline) ---
+        const membersToAddPromises = allMembers
+          .filter(m => 
+            !m.user.bot &&
+            vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
+          )
+          .map(m =>
+            thread.members.add(m.id).catch(() => {})
+          );
 
-        const memberIds = new Set();
+        await Promise.allSettled(membersToAddPromises);
 
-        // --- Fetch all roles & members from overwrites ---
-        for (const ow of allowOverwrites.values()) {
-          if (ow.type === 0) {
-            const role = await guild.roles.fetch(ow.id).catch(() => null);
-            if (role) {
-              // Fetch all members with that role (no cache reliance)
-              const fetchedMembers = await guild.members.list({ limit: 1000 }).catch(() => null);
-              fetchedMembers?.forEach(m => {
-                if (m.roles.cache.has(role.id) && !m.user.bot) memberIds.add(m.id);
-              });
-            }
-          } else if (ow.type === 1) memberIds.add(ow.id);
-        }
-
-        // Remove denied members
-        for (const ow of denyOverwrites.values()) {
-          if (ow.type === 0) {
-            const role = await guild.roles.fetch(ow.id).catch(() => null);
-            if (role) {
-              const fetchedMembers = await guild.members.list({ limit: 1000 }).catch(() => null);
-              fetchedMembers?.forEach(m => {
-                if (m.roles.cache.has(role.id)) memberIds.delete(m.id);
-              });
-            }
-          } else if (ow.type === 1) memberIds.delete(ow.id);
-        }
-
-        // --- Add all allowed users FIRST ---
-        const membersToAdd = Array.from(memberIds);
-        for (const memberId of membersToAdd) {
-          await thread.members.add(memberId).catch(err => {
-            if (![10007, 10037].includes(err.code))
-              console.warn(`[VC Thread] ⚠️ Could not add ${memberId}:`, err.message);
-          });
-        }
-
-        // --- THEN send alert embed ---
+        // --- Send embed to the thread ---
         const msg = await thread.send({ embeds: [embed] }).catch(err =>
-          console.warn(`[VC Thread] ⚠️ Failed to send alert in ${vc.name}:`, err.message)
+          console.warn(`[VC Thread] ⚠️ Failed to send embed in ${vc.name}:`, err.message)
         );
 
-        if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
+        if (msg && settings.autoDelete)
+          setTimeout(() => msg.delete().catch(() => {}), 30_000);
       } catch (err) {
-        console.error(`[VC Thread] ❌ Error in ${vc.name}:`, err.message);
+        console.error(`[VC Thread] ❌ Error in ${vc.name}:`, err);
       }
     }
 
@@ -819,7 +794,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     console.error("[voiceStateUpdate] Error:", e?.stack ?? e?.message ?? e);
   }
 });
-
 
 
 
