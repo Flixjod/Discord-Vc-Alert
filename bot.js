@@ -645,10 +645,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 
 
-// ---------- Voice state handling & thread management (v8: clean functional) ----------
-const activeVCThreads = new Map();
-const threadDeletionTimeouts = new Map();
+
+// ---------- Voice state handling & thread management (v8: sleek & fast) ----------
+const activeVCThreads = new Map(); // VC.id => thread
+const threadDeletionTimeouts = new Map(); // VC.id => timeout ID
+const vcLocks = new Map(); // VC.id => lock promise
 const THREAD_INACTIVITY_MS = 5 * 60 * 1000; // 5 min
+
+// Run a task per VC sequentially to prevent race conditions
+async function withVCLock(vcId, fn) {
+  const prev = vcLocks.get(vcId) || Promise.resolve();
+  const next = prev.finally(fn);
+  vcLocks.set(vcId, next);
+  next.finally(() => {
+    if (vcLocks.get(vcId) === next) vcLocks.delete(vcId);
+  });
+  return next;
+}
 
 async function fetchTextChannel(guild, channelId) {
   try {
@@ -675,126 +688,104 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       settings.ignoreRoleEnabled &&
       settings.ignoredRoleId &&
       member?.roles?.cache?.has(settings.ignoredRoleId)
-    )
-      return;
+    ) return;
 
-    // Ignore moves between VCs
-    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId)
-      return;
+    // Ignore VC switch (move)
+    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) return;
 
     const logChannel = await fetchTextChannel(guild, settings.textChannelId);
     if (!logChannel) return;
 
-    const avatar = user.displayAvatarURL({ dynamic: true });
-    let embed;
-
-    // ---- JOIN ----
-    if (!oldState.channelId && newState.channelId && settings.joinAlerts) {
-      await addLog("join", user.tag, newState.channel?.name || "-", guild);
-      embed = new EmbedBuilder()
-        .setColor(EmbedColors.VC_JOIN)
-        .setAuthor({ name: toSmallCaps(`${user.username} just popped in! 🔊`), iconURL: avatar })
-        .setDescription(toSmallCaps(`🎧 ${user.username} joined ${newState.channel.name} — let the vibes begin!`))
-        .setFooter({ text: toSmallCaps("🎉 welcome to the voice party!"), iconURL: client.user.displayAvatarURL() })
-        .setTimestamp();
-    }
-
-    // ---- LEAVE ----
-    else if (oldState.channelId && !newState.channelId && settings.leaveAlerts) {
-      await addLog("leave", user.tag, oldState.channel?.name || "-", guild);
-      embed = new EmbedBuilder()
-        .setColor(EmbedColors.VC_LEAVE)
-        .setAuthor({ name: toSmallCaps(`${user.username} dipped out! 🏃‍♂️`), iconURL: avatar })
-        .setDescription(toSmallCaps(`👋 ${user.username} left ${oldState.channel.name} — see ya next time!`))
-        .setFooter({ text: toSmallCaps("💨 gone but not forgotten."), iconURL: client.user.displayAvatarURL() })
-        .setTimestamp();
-    } else return;
+    const joined = !oldState.channelId && newState.channelId;
+    const left = oldState.channelId && !newState.channelId;
+    if (!joined && !left) return;
 
     const vc = newState.channel ?? oldState.channel;
     if (!vc) return;
 
-    // --- Privacy Check ---
     const everyonePerms = vc.permissionsFor(guild.roles.everyone);
-    if (!everyonePerms) return;
-    const isPrivateVC = !everyonePerms.has(PermissionsBitField.Flags.ViewChannel);
+    const isPrivateVC = everyonePerms && !everyonePerms.has(PermissionsBitField.Flags.ViewChannel);
 
-    // ---- PRIVATE VC THREAD HANDLING ----
-    if (isPrivateVC && settings.privateThreadAlerts) {
-      let thread = activeVCThreads.get(vc.id);
+    // 🪄 Create sleek embed
+    const embed = new EmbedBuilder()
+      .setColor(joined ? 0x57f287 : 0xed4245) // green for join, red for leave
+      .setAuthor({
+        name: `${user.username} ${joined ? "joined" : "left"} ${vc.name}`,
+        iconURL: user.displayAvatarURL({ dynamic: true }),
+      })
+      .setDescription(
+        joined
+          ? `> 🔊 **${user.username}** just hopped into **${vc.name}**\n> Let’s vibe 🎶`
+          : `> 👋 **${user.username}** left **${vc.name}**\n> Catch you next time! 💨`
+      )
+      .setFooter({
+        text: joined ? "🎉 Welcome to the voice party!" : "💤 VC quiets down a little...",
+        iconURL: client.user.displayAvatarURL(),
+      })
+      .setTimestamp();
 
-      const valid = thread && !thread.archived && logChannel.threads.cache.has(thread.id);
-      if (!valid) {
-        try {
-          const shortName = vc.name.length > 25 ? vc.name.slice(0, 25) + "…" : vc.name;
-          thread = await logChannel.threads.create({
-            name: `🔊│${shortName} • VC-Alerts`,
-            autoArchiveDuration: 1440,
-            type: ChannelType.PrivateThread,
-            reason: `Private VC alert thread for ${vc.name}`,
-          });
-          activeVCThreads.set(vc.id, thread);
-          console.log(`[VC Thread] 🧵 Created private thread for ${vc.name}`);
-        } catch (err) {
-          console.error(`[VC Thread] ❌ Failed to create thread for ${vc.name}:`, err.message);
-          return;
-        }
-      }
-
-      // Ensure bot joined the thread
-      if (!thread.joined) await thread.join().catch(() => {});
-
-      // Reset inactivity timer
-      if (threadDeletionTimeouts.has(vc.id)) clearTimeout(threadDeletionTimeouts.get(vc.id));
-      const timeoutId = setTimeout(async () => {
-        try {
-          await thread.delete().catch(() => {});
-          console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`);
-        } catch {}
-        activeVCThreads.delete(vc.id);
-        threadDeletionTimeouts.delete(vc.id);
-      }, THREAD_INACTIVITY_MS);
-      threadDeletionTimeouts.set(vc.id, timeoutId);
-
+    await withVCLock(vc.id, async () => {
       try {
-        // --- Fetch all guild members ---
-        const allMembers = await guild.members.fetch();
+        if (isPrivateVC && settings.privateThreadAlerts) {
+          let thread = activeVCThreads.get(vc.id);
 
-        // --- Add everyone who can view this VC (even offline) ---
-        const membersToAddPromises = allMembers
-          .filter(m => 
-            !m.user.bot &&
-            vc.permissionsFor(m).has(PermissionsBitField.Flags.ViewChannel)
-          )
-          .map(m =>
-            thread.members.add(m.id).catch(() => {})
+          // Create or reuse private thread
+          if (!thread || thread.archived || !logChannel.threads.cache.has(thread.id)) {
+            const shortName = vc.name.length > 25 ? vc.name.slice(0, 25) + "…" : vc.name;
+            thread = await logChannel.threads.create({
+              name: `🔊│${shortName} • VC Alerts`,
+              type: ChannelType.PrivateThread,
+              autoArchiveDuration: 1440,
+              reason: `Private VC alert thread for ${vc.name}`,
+            });
+            activeVCThreads.set(vc.id, thread);
+            console.log(`[VC Thread] 🧵 Created private thread for ${vc.name}`);
+          }
+
+          // Reset inactivity timeout
+          if (threadDeletionTimeouts.has(vc.id))
+            clearTimeout(threadDeletionTimeouts.get(vc.id));
+          threadDeletionTimeouts.set(
+            vc.id,
+            setTimeout(async () => {
+              await thread.delete().catch(() => {});
+              activeVCThreads.delete(vc.id);
+              threadDeletionTimeouts.delete(vc.id);
+              console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`);
+            }, THREAD_INACTIVITY_MS)
           );
 
-        await Promise.allSettled(membersToAddPromises);
+          // 🚀 Add all VC members (fast, no fetching)
+          for (const m of vc.members.values()) {
+            if (m.user.bot) continue;
+            await thread.members.add(m.id).catch(err => {
+              if (![10007, 10037].includes(err.code))
+                console.warn(`[VC Thread] ⚠️ Could not add ${m.id}:`, err.message);
+            });
+          }
 
-        // --- Send embed to the thread ---
-        const msg = await thread.send({ embeds: [embed] }).catch(err =>
-          console.warn(`[VC Thread] ⚠️ Failed to send embed in ${vc.name}:`, err.message)
-        );
-
-        if (msg && settings.autoDelete)
-          setTimeout(() => msg.delete().catch(() => {}), 30_000);
+          // 💬 Send the embed after members are added
+          const msg = await thread.send({ embeds: [embed] }).catch(err =>
+            console.warn(`[VC Thread] ⚠️ Failed to send alert in ${vc.name}:`, err.message)
+          );
+          if (msg && settings.autoDelete)
+            setTimeout(() => msg.delete().catch(() => {}), 30_000);
+        } else {
+          // Public channel alerts
+          const msg = await logChannel.send({ embeds: [embed] }).catch(err =>
+            console.warn(`[VC Alert] ⚠️ Failed to send in ${vc.name}:`, err.message)
+          );
+          if (msg && settings.autoDelete)
+            setTimeout(() => msg.delete().catch(() => {}), 30_000);
+        }
       } catch (err) {
         console.error(`[VC Thread] ❌ Error in ${vc.name}:`, err);
       }
-    }
-
-    // ---- PUBLIC ALERT ----
-    else {
-      const msg = await logChannel.send({ embeds: [embed] }).catch(e =>
-        console.warn(`[VC Alert] ⚠️ Failed to send in ${vc.name}:`, e.message)
-      );
-      if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
-    }
-  } catch (e) {
-    console.error("[voiceStateUpdate] Error:", e?.stack ?? e?.message ?? e);
+    });
+  } catch (err) {
+    console.error("[voiceStateUpdate] Error:", err);
   }
 });
-
 
 
 
