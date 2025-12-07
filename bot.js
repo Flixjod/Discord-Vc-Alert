@@ -193,8 +193,8 @@ async function generateActivityFile(guild, logs) {
   const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
   const header =
 `╔══════════════════════════════════════════════╗
-║           🌌 ${toSmallCaps(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
-║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toSmallCaps(toISTString(Date.now()))}     ║
+║           🌌 ${toSmallCaps(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
+║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toSmallCaps(toISTString(Date.now()))}     ║
 ╚══════════════════════════════════════════════╝
 
 `;
@@ -204,7 +204,7 @@ async function generateActivityFile(guild, logs) {
     const action = l.type === "join" ? "entered" :
       l.type === "leave" ? "left" : "came online";
     return `${emoji} ${l.type === "join" ? "ᴊᴏɪɴ" : l.type === "leave" ? "ʟᴇᴀᴠᴇ" : "ᴏɴʟɪɴᴇ"} — ${l.user} ${action} ${l.channel}
-   🕒 ${ago} • ${toISTString(l.time)}\n`;
+    🕒 ${ago} • ${toISTString(l.time)}\n`;
   }).join("\n");
   await fsp.writeFile(filePath, header + body, "utf8");
   return filePath;
@@ -284,29 +284,6 @@ function startSbLeaveTimer(guildId) {
   }, 10 * 60 * 1000);
 }
 
-// ---------- leave when VC becomes empty ----------
-async function sbCheckAndLeaveIfEmpty(guildId, channelId) {
-  try {
-    const guild = client.guilds.cache.get(guildId);
-    if (!guild) return;
-    const ch = guild.channels.cache.get(channelId) || await guild.channels.fetch(channelId).catch(()=>null);
-    if (!ch || ch.type !== ChannelType.GuildVoice) return;
-    const humans = ch.members.filter(m => !m.user.bot);
-    if (humans.size === 0) {
-      const conn = getVoiceConnection(guildId);
-      if (conn && conn.joinConfig.channelId === channelId) {
-        conn.destroy();
-        const q = getSbQueue(guildId);
-        q.list = [];
-        q.now = null;
-        q.vcId = null;
-        await sbUpdatePanel(guild);
-        console.log(`[sb] left empty VC ${channelId} for guild ${guildId}`);
-      }
-    }
-  } catch (e) { console.error("[sb empty leave]", e); }
-}
-
 // ---------- ensure storage channel (only on add) ----------
 async function sbEnsureStorage(guild) {
   let channel = guild.channels.cache.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
@@ -329,7 +306,7 @@ async function sbEnsureStorage(guild) {
   return channel;
 }
 
-// ---------- play next in queue ----------
+// ---------- play next in queue (Modified for Link Refreshing) ----------
 async function sbPlayNext(guild, textChannel = null) {
   const q = getSbQueue(guild.id);
   if (!q.list.length) {
@@ -343,8 +320,28 @@ async function sbPlayNext(guild, textChannel = null) {
   q.now = next;
 
   try {
-    const resource = createAudioResource(next.fileURL);
+    let streamUrl = next.fileURL;
+
+    // ─── CRITICAL FIX: REFRESH URL ───
+    // If we have the message ID where the file lives, fetch it to get a fresh URL.
+    if (next.storageMessageId) {
+      try {
+        const storageCh = guild.channels.cache.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
+        if (storageCh) {
+          const msg = await storageCh.messages.fetch(next.storageMessageId);
+          if (msg.attachments.size > 0) {
+            streamUrl = msg.attachments.first().url;
+            // console.log(`[sb] Refreshed URL for ${next.name}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[sb] Could not refresh URL for ${next.name} (using cached):`, err.message);
+      }
+    }
+
+    const resource = createAudioResource(streamUrl);
     q.player.play(resource);
+
     if (textChannel && textChannel.send) {
       await textChannel.send({
         embeds: [
@@ -861,7 +858,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
               });
             }
 
-            q.list.push({ name: sound.name, fileURL: sound.fileURL });
+            // CRITICAL: Push storageMessageId so the player can refresh the link
+            q.list.push({
+              name: sound.name,
+              fileURL: sound.fileURL,
+              storageMessageId: sound.storageMessageId
+            });
+
             if (!q.now) await sbPlayNext(guild, interaction.channel);
 
             await sbUpdatePanel(guild);
