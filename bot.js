@@ -220,7 +220,7 @@ const soundSchema = new mongoose.Schema({
   addedBy: { type: String, default: null },
   createdAt: { type: Date, default: Date.now }
 });
-const Sound = mongoose.models.Sound || mongoose.model("Sound", soundSchema);
+const Sound = mongoose.model("Soundboards", soundSchema);
 
 // ---------- In-memory queue & panels ----------
 const sbQueues = new Map();   // guildId -> { player, list[], now, vcId, timeout }
