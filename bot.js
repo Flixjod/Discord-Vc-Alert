@@ -436,7 +436,7 @@ async function buildSoundPanelEmbed(guild, page = 0) {
   );
 
   return { embed, buttons: [row1, row2] };
-
+}
 
 // ---------- Discord client ----------
 const client = new Client({
