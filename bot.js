@@ -226,13 +226,35 @@ const Sound = mongoose.model("Soundboards", soundSchema);
 const sbQueues = new Map();   // guildId -> { player, list[], now, vcId, timeout }
 const sbPanels = new Map();   // guildId -> { messageId, channelId, page }
 
-// ---------- queue helper ----------
+// ---------- queue helper (Enhanced Debug & Auto-Recovery) ----------
 function getSbQueue(guildId) {
   if (!sbQueues.has(guildId)) {
     const player = createAudioPlayer();
-    const q = { player, list: [], now: null, vcId: null, timeout: null };
+    const q = { 
+      player, 
+      list: [], 
+      now: null, 
+      vcId: null, 
+      timeout: null,
+      guildId: guildId 
+    };
 
-    // per-player: when a track ends → play next or start leave timer
+    // DEBUG: Monitor player state
+    player.on('stateChange', (oldState, newState) => {
+      console.log(`[AudioPlayer] ${oldState.status} -> ${newState.status} (Guild: ${guildId})`);
+      
+      // AUTO-RECOVERY: If stuck buffering > 10s, force skip
+      if (newState.status === 'buffering') {
+        const checkTimer = setTimeout(() => {
+          if (q.player.state.status === 'buffering') {
+            console.warn('[sb Auto-Recovery] Stuck buffering, skipping track.');
+            q.player.stop(); // Triggers Idle -> Play Next
+          }
+        }, 10000);
+      }
+    });
+
+    // Event: Track finished
     player.on(AudioPlayerStatus.Idle, async () => {
       try {
         q.now = null;
@@ -250,12 +272,15 @@ function getSbQueue(guildId) {
       }
     });
 
+    // Event: Player Error
     player.on("error", (err) => {
       console.error("[sb player error]", err);
-      // clear now and try next
       q.now = null;
       const guild = client.guilds.cache.get(guildId);
-      if (guild) sbPlayNext(guild).catch(()=>{});
+      if (guild) {
+        // Retry next song after 1s delay
+        setTimeout(() => sbPlayNext(guild).catch(()=>{}), 1000);
+      }
     });
 
     sbQueues.set(guildId, q);
@@ -306,7 +331,7 @@ async function sbEnsureStorage(guild) {
   return channel;
 }
 
-// ---------- play next in queue (Modified for Link Refreshing) ----------
+// ---------- play next in queue (Robust Link Refresh) ----------
 async function sbPlayNext(guild, textChannel = null) {
   const q = getSbQueue(guild.id);
   if (!q.list.length) {
@@ -321,17 +346,20 @@ async function sbPlayNext(guild, textChannel = null) {
 
   try {
     let streamUrl = next.fileURL;
+    console.log(`[sb] preparing: ${next.name}`);
 
     // ─── CRITICAL FIX: REFRESH URL ───
-    // If we have the message ID where the file lives, fetch it to get a fresh URL.
     if (next.storageMessageId) {
       try {
-        const storageCh = guild.channels.cache.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
+        // Force fetch channels to ensure cache is populated
+        const channels = await guild.channels.fetch();
+        const storageCh = channels.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
+        
         if (storageCh) {
           const msg = await storageCh.messages.fetch(next.storageMessageId);
           if (msg.attachments.size > 0) {
             streamUrl = msg.attachments.first().url;
-            // console.log(`[sb] Refreshed URL for ${next.name}`);
+            console.log(`[sb] Refreshed URL for ${next.name}`);
           }
         }
       } catch (err) {
@@ -339,7 +367,10 @@ async function sbPlayNext(guild, textChannel = null) {
       }
     }
 
-    const resource = createAudioResource(streamUrl);
+    // Use inlineVolume to fix silent streams, requires ffmpeg
+    const resource = createAudioResource(streamUrl, { inlineVolume: true });
+    resource.volume.setVolume(1.0);
+    
     q.player.play(resource);
 
     if (textChannel && textChannel.send) {
@@ -357,7 +388,8 @@ async function sbPlayNext(guild, textChannel = null) {
   } catch (e) {
     console.error("[sb playNext error]", e);
     q.now = null;
-    setTimeout(()=> sbPlayNext(guild).catch(()=>{}), 500);
+    // Skip to next if this one failed
+    setTimeout(()=> sbPlayNext(guild).catch(()=>{}), 1000);
   }
 }
 
@@ -371,11 +403,18 @@ async function sbConnectToMember(member) {
     const conn = joinVoiceChannel({
       channelId: vc.id,
       guildId: guild.id,
-      adapterCreator: guild.voiceAdapterCreator
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: false // Sometimes improves priority
     });
 
     const q = getSbQueue(guild.id);
     q.vcId = vc.id;
+    
+    // Debug connection state
+    conn.on('stateChange', (oldState, newState) => {
+      console.log(`[Connection] ${oldState.status} -> ${newState.status}`);
+    });
+
     if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
     conn.subscribe(q.player);
     return { connection: conn, channel: vc };
@@ -399,7 +438,7 @@ async function sbUpdatePanel(guild) {
 }
 
 
-// ---------- Sound Panel builder (minimal with total count + queue preview) ----------
+// ---------- Sound Panel builder ----------
 async function buildSoundPanelEmbed(guild, page = 0) {
   const q = getSbQueue(guild.id);
   const total = await Sound.countDocuments({ guildId: guild.id }).catch(()=>0);
@@ -433,7 +472,7 @@ async function buildSoundPanelEmbed(guild, page = 0) {
   );
 
   return { embed, buttons: [row1, row2] };
-}
+} // Fixed: Closing brace restored
 
 // ---------- Discord client ----------
 const client = new Client({
@@ -603,7 +642,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         case "activate": {
-          // same logic you had previously (kept structure, uses makeEmbed)
           const selected = interaction.options.getChannel("channel");
           let channel = selected ?? (
             settings.textChannelId
@@ -782,7 +820,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ------------------ SOUND-BOARD: top-level 'sound' command ------------------
         case "sound": {
-          // subcommands: add / play / delete / list / panel / stop (optional)
           const sub = interaction.options.getSubcommand();
           const q = getSbQueue(guildId); // from your sound-module
 
@@ -858,7 +895,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               });
             }
 
-            // CRITICAL: Push storageMessageId so the player can refresh the link
+            // Ensure we push the storageMessageId so the player can refresh the link
             q.list.push({
               name: sound.name,
               fileURL: sound.fileURL,
@@ -940,7 +977,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ---------------------- BUTTON INTERACTIONS ----------------------
     //
     if (interaction.isButton()) {
-      // require admin for VC-alerts buttons, but allow sound panel buttons for admins only (consistent)
       if (!await checkAdmin(interaction)) return;
 
       const customId = interaction.customId;
@@ -1033,7 +1069,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.deferUpdate();
         }
 
-        // pagination or other sb_ actions
         if (customId.startsWith("sb_prev_") || customId.startsWith("sb_next_")) {
           const parts = customId.split("_");
           const cur = Number(parts[2]) || 0;
@@ -1044,7 +1079,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
-      // after processing VC alert toggles, persist settings & update panel
       await updateGuildSettings(settingsToUpdate);
       const updatedPanel = buildControlPanel(settingsToUpdate, guild);
       return interaction.update({ embeds: [updatedPanel.embed], components: [updatedPanel.buttons] });
@@ -1054,7 +1088,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ---------------------- AUTOCOMPLETE ----------------------
     //
     if (interaction.isAutocomplete()) {
-      // only for /sound commands (we registered sound subcommands with autocomplete)
       if (interaction.commandName !== "sound") return;
 
       const sub = interaction.options.getSubcommand();
@@ -1068,7 +1101,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.respond(exist.map(n => ({ name: toSmallCaps("⚠ " + n + " (exists)"), value: n })));
       }
 
-      // play & delete
       const matches = names.filter(n => n.toLowerCase().includes(focused)).slice(0,25);
       if (!matches.length) return interaction.respond([{ name: toSmallCaps("ɴᴏ ʀᴇsᴜʟᴛs"), value: "" }]);
       return interaction.respond(matches.map(n => ({ name: toSmallCaps("🎵 " + n), value: n })));
@@ -1083,8 +1115,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (_) {}
   }
 });
-
-
 
 // ─────────────── Voice Channel Alert System (v10.2 — Full Access Edition) ───────────────
 const activeVCThreads = new Map();
@@ -1158,7 +1188,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     const avatar = user.displayAvatarURL({ dynamic: true });
     const botAvatar = client.user.displayAvatarURL();
 
-    // ── Build Embed ──
     let embed;
     if (joined) {
       await addLog("join", user.tag, vc.name, guild);
@@ -1194,7 +1223,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         .setTimestamp();
     } else return;
 
-    // ─────────────── Thread / Alert Handling ───────────────
     await withVCLock(vc.id, async () => {
       const everyonePerms = vc.permissionsFor(guild.roles.everyone);
       const isPrivateVC =
@@ -1203,7 +1231,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       if (isPrivateVC && settings.privateThreadAlerts) {
         let thread = activeVCThreads.get(vc.id);
 
-        // ── Ensure Thread Exists ──
         if (!thread || thread.archived || !logChannel.threads.cache.has(thread.id)) {
           const shortName =
             vc.name.length > 80 ? vc.name.slice(0, 80) + "…" : vc.name;
@@ -1222,7 +1249,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
           }
         }
 
-        // ── Reset Inactivity Timeout ──
         if (threadDeletionTimeouts.has(vc.id))
           clearTimeout(threadDeletionTimeouts.get(vc.id));
         const timeout = setTimeout(async () => {
@@ -1237,11 +1263,9 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         timeout.unref();
         threadDeletionTimeouts.set(vc.id, timeout);
 
-        // ─────────────── Collect All Members with Access ───────────────
         const memberIds = new Set();
         const allMembers = guild.members.cache.filter((m) => !m.user.bot);
 
-        // Base pass: anyone who can view the VC (includes inherited perms)
         allMembers.forEach((m) => {
           const perms = vc.permissionsFor(m);
           if (perms?.has(PermissionsBitField.Flags.ViewChannel)) {
@@ -1249,24 +1273,15 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
           }
         });
 
-        // ─────────────── Add Members to Thread (BEST METHOD) ───────────────
         const ids = [...memberIds];
-        const BATCH_SIZE = 20; // safe + fast
+        const BATCH_SIZE = 20;
         
         for (let i = 0; i < ids.length; i += BATCH_SIZE) {
           const batch = ids.slice(i, i + BATCH_SIZE);
-        
-          await Promise.all(
-            batch.map(id => 
-              thread.members.add(id).catch(() => {})
-            )
-          );
-        
-          // Tiny delay avoids rate limits for huge servers
+          await Promise.all(batch.map(id => thread.members.add(id).catch(() => {})));
           await new Promise(res => setTimeout(res, 100));
         }
 
-        // ─────────────── Send Embed ───────────────
         try {
           const msg = await thread.send({ embeds: [embed] });
           if (msg && settings.autoDelete)
@@ -1276,7 +1291,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         }
 
       } else {
-        // ─────────────── Public VC Alert ───────────────
         try {
           const msg = await logChannel.send({ embeds: [embed] });
           if (msg && settings.autoDelete)
@@ -1290,10 +1304,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     console.error("[voiceStateUpdate] Error:", err);
   }
 });
-
-
-
-
 
 // ---------- Presence (online) handler ----------
 client.on("presenceUpdate", async (oldPresence, newPresence) => {
