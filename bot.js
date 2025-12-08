@@ -25,7 +25,10 @@ import {
   createAudioPlayer,
   createAudioResource,
   AudioPlayerStatus,
-  getVoiceConnection
+  getVoiceConnection,
+  entersState,
+  VoiceConnectionStatus,
+  StreamType
 } from "@discordjs/voice";
 
 import mongoose from "mongoose";
@@ -240,14 +243,14 @@ function getSbQueue(guildId) {
     player.on('stateChange', (oldState, newState) => {
       console.log(`[AudioPlayer] ${oldState.status} -> ${newState.status} (Guild: ${guildId})`);
       
-      // AUTO-RECOVERY: If stuck buffering > 8s, force skip
+      // AUTO-RECOVERY: If stuck buffering > 10s, force skip
       if (newState.status === 'buffering') {
         setTimeout(() => {
           if (q.player.state.status === 'buffering') {
             console.warn('[sb Auto-Recovery] Stuck buffering, skipping track.');
             q.player.stop(); // Triggers Idle -> Play Next
           }
-        }, 8000);
+        }, 10000);
       }
     });
 
@@ -372,8 +375,11 @@ async function sbPlayNext(guild, textChannel = null) {
       }
     }
 
-    // Use inlineVolume to fix silent streams, requires ffmpeg
-    const resource = createAudioResource(streamUrl, { inlineVolume: true });
+    // CRITICAL FIX: Force FFMPEG via Arbitrary stream type
+    const resource = createAudioResource(streamUrl, { 
+      inputType: StreamType.Arbitrary,
+      inlineVolume: true 
+    });
     resource.volume.setVolume(1.0);
     
     q.player.play(resource);
@@ -415,6 +421,15 @@ async function sbConnectToMember(member) {
       adapterCreator: guild.voiceAdapterCreator,
       selfDeaf: false
     });
+
+    // ─── CRITICAL FIX: WAIT FOR CONNECTION TO BE READY ───
+    try {
+      await entersState(conn, VoiceConnectionStatus.Ready, 15_000); // Wait up to 15s for handshake
+    } catch (err) {
+      console.error("[sb connect] Connection never became ready", err);
+      conn.destroy();
+      return { error: "connect_timeout" };
+    }
 
     const q = getSbQueue(guild.id);
     q.vcId = vc.id;
@@ -638,7 +653,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({
             embeds: [panel.embed],
             components: panel.buttons,
-            ephemeral: true
+            flags: 64
           });
         }
 
@@ -654,7 +669,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (!channel || channel.type !== ChannelType.GuildText) {
             return interaction.reply({
               embeds: [makeEmbed({ title: toSmallCaps("⚠️ invalid channel"), description: toSmallCaps("please choose a **text channel** where i can post vc alerts.\ntry `/activate #channel` to set one manually 💬"), color: EmbedColors.ERROR, guild })],
-              ephemeral: true,
+              flags: 64,
             });
           }
 
@@ -663,14 +678,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages)) {
             return interaction.reply({
               embeds: [makeEmbed({ title: toSmallCaps("🚫 missing permissions"), description: toSmallCaps(`i need **view** + **send** permissions in ${channel} to post vc alerts.\nplease fix that and try again 🔧`), color: EmbedColors.ERROR, guild })],
-              ephemeral: true,
+              flags: 64,
             });
           }
 
           if (settings.alertsEnabled && settings.textChannelId === channel.id) {
             return interaction.reply({
               embeds: [makeEmbed({ title: toSmallCaps("🟢 vc alerts already active"), description: toSmallCaps(`alerts are already running in ${channel} ⚡\nuse \`/settings\` to tweak or customize them.`), color: EmbedColors.WARNING, guild })],
-              ephemeral: true,
+              flags: 64,
             });
           }
 
@@ -680,17 +695,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           return interaction.reply({
             embeds: [makeEmbed({ title: toSmallCaps("✅ vc alerts activated"), description: toSmallCaps(`vibe monitor engaged! 🎧\nall voice activity will now appear in ${channel}.\nuse \`/settings\` to fine-tune your alerts ✨`), color: EmbedColors.SUCCESS, guild })],
-            ephemeral: true,
+            flags: 64,
           });
         }
 
         case "deactivate": {
           if (!settings.alertsEnabled) {
-            return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("💤 vc alerts already off"), description: toSmallCaps("they’re already paused 😴\nuse `/activate` when you’re ready to bring the vibes back."), color: EmbedColors.WARNING, guild })], ephemeral: true });
+            return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("💤 vc alerts already off"), description: toSmallCaps("they’re already paused 😴\nuse `/activate` when you’re ready to bring the vibes back."), color: EmbedColors.WARNING, guild })], flags: 64 });
           }
           settings.alertsEnabled = false;
           await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("🔕 vc alerts powered down"), description: toSmallCaps("taking a chill break 🪷\nno join or leave pings until you power them up again with `/activate`."), color: EmbedColors.ERROR, guild })], ephemeral: true });
+          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("🔕 vc alerts powered down"), description: toSmallCaps("taking a chill break 🪷\nno join or leave pings until you power them up again with `/activate`."), color: EmbedColors.ERROR, guild })], flags: 64 });
         }
 
         case "setignorerole": {
@@ -698,18 +713,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
           settings.ignoredRoleId = role.id;
           settings.ignoreRoleEnabled = true;
           await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("🙈 ignored role set"), description: toSmallCaps(`members with the ${role} role will now be skipped in vc alerts 🚫\nperfect for staff, bots, or background lurkers 😌`), color: EmbedColors.RESET, guild })], ephemeral: true });
+          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("🙈 ignored role set"), description: toSmallCaps(`members with the ${role} role will now be skipped in vc alerts 🚫\nperfect for staff, bots, or background lurkers 😌`), color: EmbedColors.RESET, guild })], flags: 64 });
         }
 
         case "resetignorerole": {
           settings.ignoredRoleId = null;
           settings.ignoreRoleEnabled = false;
           await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("👀 ignored role cleared"), description: toSmallCaps("everyone’s back on the radar 🌍\nall members will now appear in vc alerts again 💫"), color: EmbedColors.RESET, guild })], ephemeral: true });
+          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("👀 ignored role cleared"), description: toSmallCaps("everyone’s back on the radar 🌍\nall members will now appear in vc alerts again 💫"), color: EmbedColors.RESET, guild })], flags: 64 });
         }
 
         case "logs": {
-          await interaction.deferReply({ ephemeral: true });
+          await interaction.deferReply({ flags: 64 });
           const logs = await GuildLog.find({ guildId: guild.id }).sort({ time: -1 }).limit(20).lean();
 
           if (logs.length === 0) {
@@ -737,16 +752,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // ----- /sound add -----
           if (sub === "add") {
             if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
-              return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], ephemeral: true });
+              return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], flags: 64 });
             }
             const name = interaction.options.getString("name");
             const file = interaction.options.getAttachment("file");
-            if (!file) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("⚠ ɴᴏ ғɪʟᴇ"), description: toSmallCaps("attach an audio file"), color: EmbedColors.WARNING, guild }) ], ephemeral: true });
+            if (!file) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("⚠ ɴᴏ ғɪʟᴇ"), description: toSmallCaps("attach an audio file"), color: EmbedColors.WARNING, guild }) ], flags: 64 });
 
             const exists = await Sound.findOne({ guildId, name });
-            if (exists) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs"), description: toSmallCaps(`**${name}** already exists`), color: EmbedColors.WARNING, guild }) ], ephemeral: true });
+            if (exists) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs"), description: toSmallCaps(`**${name}** already exists`), color: EmbedColors.WARNING, guild }) ], flags: 64 });
 
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: 64 });
             let storage = null;
             try { storage = await sbEnsureStorage(guild); } catch (e) { console.error("[sb ensure storage]", e); }
             let uploadedUrl = file.url;
@@ -762,10 +777,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (sub === "play") {
             const name = interaction.options.getString("name");
             const sound = await Sound.findOne({ guildId, name });
-            if (!sound) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(toSmallCaps("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(toSmallCaps("that sound is not on the server")).setTimestamp() ], ephemeral: true });
+            if (!sound) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(toSmallCaps("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(toSmallCaps("that sound is not on the server")).setTimestamp() ], flags: 64 });
 
             const res = await sbConnectToMember(interaction.member);
-            if (res?.error) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ")).setDescription(toSmallCaps("join a voice channel to play sounds")).setTimestamp() ], ephemeral: true });
+            if (res?.error) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ")).setDescription(toSmallCaps("join a voice channel to play sounds")).setTimestamp() ], flags: 64 });
 
             // SMART NOTIFICATION LOGIC
             const isIdle = !q.now; 
@@ -786,10 +801,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           // ----- /sound delete -----
           if (sub === "delete") {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], ephemeral: true });
+            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], flags: 64 });
             const name = interaction.options.getString("name");
             const doc = await Sound.findOne({ guildId, name });
-            if (!doc) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(toSmallCaps("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(toSmallCaps("sound not found")).setTimestamp() ], ephemeral: true });
+            if (!doc) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(toSmallCaps("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(toSmallCaps("sound not found")).setTimestamp() ], flags: 64 });
             if (doc.storageMessageId) {
               const storage = guild.channels.cache.find(c => c.name === "soundboard-storage");
               if (storage) {
@@ -805,20 +820,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // ----- /sound list -----
           if (sub === "list") {
             const docs = await Sound.find({ guildId }).sort({ name: 1 });
-            if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds added")).setTimestamp() ], ephemeral: true });
+            if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds added")).setTimestamp() ], flags: 64 });
             const text = docs.map((s, idx) => `\`${idx+1}.\` **${s.name}** — <@${s.addedBy}>`).join("\n");
-            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(toSmallCaps(text)).setFooter({ text: toSmallCaps(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp() ], ephemeral: true });
+            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(toSmallCaps(text)).setFooter({ text: toSmallCaps(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp() ], flags: 64 });
           }
 
           // ----- /sound panel -----
           if (sub === "panel") {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], ephemeral: true });
+            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], flags: 64 });
             const ui = await buildSoundPanelEmbed(guild, 0);
-            const msg = await interaction.reply({ embeds: [ui.embed], components: ui.buttons, fetchReply: true });
+            const msg = await interaction.reply({ embeds: [ui.embed], components: ui.buttons, withResponse: true });
             sbPanels.set(guildId, { messageId: msg.id, channelId: msg.channelId, page: 0 });
             return;
           }
-          return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("sound — usage")).setDescription(toSmallCaps("/sound add|play|delete|list|panel")).setTimestamp() ], ephemeral: true });
+          return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("sound — usage")).setDescription(toSmallCaps("/sound add|play|delete|list|panel")).setTimestamp() ], flags: 64 });
         }
       }
     } 
@@ -850,8 +865,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const newSettings = await getGuildSettings(guildId);
             const panel = buildControlPanel(newSettings, guild);
             await interaction.update({ embeds: [panel.embed], components: [panel.buttons] });
-            await interaction.followUp({ content: toSmallCaps("🎉 VC Alert Settings Reset!"), ephemeral: true });
-          } catch (e) { console.error("[confirmReset]", e); await interaction.followUp({ content: toSmallCaps("❌ error while resetting"), ephemeral: true }); }
+            await interaction.followUp({ content: toSmallCaps("🎉 VC Alert Settings Reset!"), flags: 64 });
+          } catch (e) { console.error("[confirmReset]", e); await interaction.followUp({ content: toSmallCaps("❌ error while resetting"), flags: 64 }); }
           return;
         }
         case "cancelReset": {
@@ -867,7 +882,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (customId === "sb_refresh") { await sbUpdatePanel(guild); return interaction.deferUpdate(); }
         if (customId === "sb_connect") {
           const res = await sbConnectToMember(interaction.member);
-          if (res?.error) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 ᴊᴏɴ ᴀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ")).setDescription(toSmallCaps("join a voice channel to connect")).setTimestamp() ], ephemeral: true });
+          if (res?.error) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 ᴊᴏɴ ᴀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ")).setDescription(toSmallCaps("join a voice channel to connect")).setTimestamp() ], flags: 64 });
           q.vcId = res.channel.id;
           if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
           await sbUpdatePanel(guild);
@@ -909,7 +924,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   } catch (err) {
     console.error("[Interaction Handler] Error:", err?.stack ?? err?.message ?? err);
-    try { if (interaction && !interaction.replied) await interaction.reply({ content: toSmallCaps("An error occurred while processing your request."), ephemeral: true }); } catch (_) {}
+    try { if (interaction && !interaction.replied) await interaction.reply({ content: toSmallCaps("An error occurred while processing your request."), flags: 64 }); } catch (_) {}
   }
 });
 
@@ -1026,7 +1041,7 @@ async function checkAdmin(interaction) {
   const guild = interaction.guild;
   const member = interaction.member;
   const hasPermission = member?.permissions?.has(PermissionFlagsBits.Administrator) || member?.permissions?.has(PermissionFlagsBits.ManageGuild);
-  if (!hasPermission) { await interaction.reply({ embeds: [makeEmbed({ title: "No Permission", description: "You need Administrator or Manage Server permission to use this.", color: EmbedColors.ERROR, guild })], ephemeral: true }); return false; }
+  if (!hasPermission) { await interaction.reply({ embeds: [makeEmbed({ title: "No Permission", description: "You need Administrator or Manage Server permission to use this.", color: EmbedColors.ERROR, guild })], flags: 64 }); return false; }
   return true;
 }
 
