@@ -3,6 +3,11 @@ import fs from "fs";
 const fsp = fs.promises;
 import path from "path";
 import { fileURLToPath } from "url";
+import axios from "axios"; // Required for downloading
+import { pipeline } from "stream";
+import { promisify } from "util";
+const streamPipeline = promisify(pipeline);
+
 import {
   Client,
   GatewayIntentBits,
@@ -39,11 +44,23 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Create Temp Directory for downloads
+const TEMP_DIR = path.join(__dirname, "temp");
+const LOGS_DIR = path.join(__dirname, "logs");
+
+if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+
+// Clean temp dir on startup
+fs.readdir(TEMP_DIR, (err, files) => {
+  if (err) return;
+  for (const file of files) {
+    fs.unlink(path.join(TEMP_DIR, file), () => {});
+  }
+});
+
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 8000;
-const LOG_FILE_PATH = path.join(__dirname, "vc_logs.txt");
-const LOGS_DIR = path.join(__dirname, "logs");
-if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 
 // ---------- Small-caps utility ----------
 const SMALL_CAPS_MAP = {
@@ -110,7 +127,7 @@ const logSchema = new mongoose.Schema({
   type: String,
   time: { type: Date, default: Date.now }
 });
-logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 }); // auto-delete 30 days
+logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
 logSchema.index({ guildId: 1, time: -1 });
 const GuildLog = mongoose.model("GuildLog", logSchema);
 
@@ -191,8 +208,8 @@ async function generateActivityFile(guild, logs) {
   const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
   const header =
 `╔══════════════════════════════════════════════╗
-║           🌌 ${toSmallCaps(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
-║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toSmallCaps(toISTString(Date.now()))}     ║
+║           🌌 ${toSmallCaps(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
+║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toSmallCaps(toISTString(Date.now()))}     ║
 ╚══════════════════════════════════════════════╝
 
 `;
@@ -221,8 +238,8 @@ const soundSchema = new mongoose.Schema({
 const Sound = mongoose.model("Soundboards", soundSchema);
 
 // ---------- In-memory queue & panels ----------
-const sbQueues = new Map();   // guildId -> { player, list[], now, vcId, timeout, lastTextChannel }
-const sbPanels = new Map();   // guildId -> { messageId, channelId, page }
+const sbQueues = new Map();   // guildId -> { player, list[], now, vcId, timeout, lastTextChannel, currentFile }
+const sbPanels = new Map();   // guildId -> { messageId, channelId } (Removed Page)
 
 // ---------- queue helper (Enhanced Debug & Auto-Recovery) ----------
 function getSbQueue(guildId) {
@@ -235,27 +252,35 @@ function getSbQueue(guildId) {
       vcId: null, 
       timeout: null,
       guildId: guildId,
-      lastTextChannel: null // To notify on errors
+      lastTextChannel: null,
+      currentFile: null // TRACKS CURRENT LOCAL FILE
     };
 
     // DEBUG: Monitor player state
     player.on('stateChange', (oldState, newState) => {
       console.log(`[AudioPlayer] ${oldState.status} -> ${newState.status} (Guild: ${guildId})`);
-      
-      // AUTO-RECOVERY: If stuck buffering > 8s, force skip
       if (newState.status === 'buffering') {
         setTimeout(() => {
           if (q.player.state.status === 'buffering') {
             console.warn('[sb Auto-Recovery] Stuck buffering, skipping track.');
-            q.player.stop(); // Triggers Idle -> Play Next
+            q.player.stop(); 
           }
         }, 8000);
       }
     });
 
-    // Event: Track finished
+    // Event: Track finished (Idle)
     player.on(AudioPlayerStatus.Idle, async () => {
       try {
+        // DELETE LOCAL FILE
+        if (q.currentFile && fs.existsSync(q.currentFile)) {
+            try {
+                await fsp.unlink(q.currentFile);
+                console.log(`[sb] Deleted temp file: ${q.currentFile}`);
+            } catch(e) { console.error("[sb] Failed delete:", e); }
+            q.currentFile = null;
+        }
+
         q.now = null;
         const guild = client.guilds.cache.get(guildId);
         if (!guild) return;
@@ -274,19 +299,13 @@ function getSbQueue(guildId) {
     // Event: Player Error
     player.on("error", (err) => {
       console.error("[sb player error]", err);
-      // Notify user of failure
       if (q.lastTextChannel) {
         q.lastTextChannel.send({ 
-            content: `⚠️ **${q.now?.name || 'Track'}** failed to load. Skipping to next...` 
+            content: `⚠️ **${q.now?.name || 'Track'}** failed. Skipping...` 
         }).catch(()=>{});
       }
-      
-      q.now = null;
-      const guild = client.guilds.cache.get(guildId);
-      if (guild) {
-        // Retry next song after 1s delay
-        setTimeout(() => sbPlayNext(guild, q.lastTextChannel).catch(()=>{}), 1000);
-      }
+      // Force skip triggers idle, which triggers cleanup
+      q.player.stop(); 
     });
 
     sbQueues.set(guildId, q);
@@ -320,7 +339,6 @@ async function sbEnsureStorage(guild) {
   let channel = guild.channels.cache.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
   if (channel) return channel;
 
-  // check permission to create channel
   const me = await guild.members.fetch(client.user.id).catch(()=>null);
   if (!me?.permissions.has(PermissionFlagsBits.ManageChannels)) {
     throw new Error("Missing ManageChannels permission to create storage channel");
@@ -337,7 +355,7 @@ async function sbEnsureStorage(guild) {
   return channel;
 }
 
-// ---------- play next in queue (Robust Auto-Repair) ----------
+// ---------- play next in queue (DOWNLOAD -> PLAY -> DELETE) ----------
 async function sbPlayNext(guild, textChannel = null) {
   const q = getSbQueue(guild.id);
   if (textChannel) q.lastTextChannel = textChannel;
@@ -352,86 +370,51 @@ async function sbPlayNext(guild, textChannel = null) {
   const next = q.list.shift();
   q.now = next;
 
-  try {
-    let streamUrl = next.fileURL;
-    let needsRepair = false;
+  let localFilePath = null;
 
+  try {
     console.log(`[sb] preparing: ${next.name}`);
 
-    // Fetch storage channel once
+    // 1. Resolve URL (ID refresh logic)
+    let downloadUrl = next.fileURL;
     const channels = await guild.channels.fetch();
     const storageCh = channels.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
 
-    if (storageCh) {
-      // SCENARIO 1: We have an ID (New Sounds)
-      if (next.storageMessageId) {
-        try {
-          const msg = await storageCh.messages.fetch(next.storageMessageId);
-          if (msg.attachments.size > 0) {
-            streamUrl = msg.attachments.first().url;
-            console.log(`[sb] Refreshed URL via ID for ${next.name}`);
-          }
-        } catch (err) {
-          console.warn(`[sb] ID refresh failed, will attempt fallback search...`);
-          needsRepair = true;
+    if (storageCh && next.storageMessageId) {
+      try {
+        const msg = await storageCh.messages.fetch(next.storageMessageId);
+        if (msg.attachments.size > 0) {
+          downloadUrl = msg.attachments.first().url;
         }
-      } else {
-        // SCENARIO 2: No ID (Legacy Sounds) - Needs Search
-        console.log(`[sb] No Storage ID for ${next.name}, searching channel...`);
-        needsRepair = true;
-      }
-
-      // SCENARIO 3: Repair/Fallback Search
-      if (needsRepair) {
-        try {
-          // Search last 100 messages for a file that roughly matches
-          const messages = await storageCh.messages.fetch({ limit: 100 });
-          const found = messages.find(m => m.attachments.size > 0 && 
-            (m.content.includes(next.name) || 
-             m.attachments.first().name.toLowerCase().includes(next.name.toLowerCase()) ||
-             // fallback: just grab matching file extension if needed, but risky. 
-             // Let's rely on attachment existence.
-             true
-            )
-          );
-          
-          // Actually, we need to match carefully.
-          // Since we can't easily match filename to "sound name" (user might have renamed),
-          // We look for ANY message with an attachment sent by the bot? No.
-          // Let's assume the user uploaded it, so we can't filter by user.
-          
-          // BETTER FALLBACK:
-          // If we can't find it, we just warn.
-          // But if we find a message that looks like it might be it (very hard without ID).
-          
-          // Wait! when we add sound, we send it. 
-          // If the user didn't change the channel, the file is there.
-          
-          // For now, if repair is needed but we can't find exact ID, we might have to fail gracefully.
-          // BUT, let's try to update the DB if we DO find a valid link from a previous fetch (unlikely).
-          
-          // Okay, if needsRepair is true and we failed to find it, streamUrl is likely dead.
-          // However, if the user JUST added it, next.storageMessageId SHOULD be there.
-          
-          // If this is a Legacy sound, streamUrl is 100% dead.
-          // We will notify the user to re-add.
-          if (!next.storageMessageId) {
-             if (textChannel) textChannel.send(`⚠️ **${next.name}** is an old sound. Please delete and re-add it to fix the link!`).catch(()=>{});
-          }
-          
-        } catch (err) {
-          console.error("Fallback search error", err);
-        }
+      } catch (err) {
+        console.warn(`[sb] ID refresh failed for ${next.name}, trying stored URL...`);
       }
     }
 
-    // Use inlineVolume to fix silent streams, requires ffmpeg
-    const resource = createAudioResource(streamUrl, { 
+    // 2. Download File
+    const fileExt = path.extname(new URL(downloadUrl).pathname) || ".mp3";
+    const fileName = `${guild.id}_${Date.now()}${fileExt}`;
+    localFilePath = path.join(TEMP_DIR, fileName);
+
+    console.log(`[sb] Downloading ${next.name} to ${localFilePath}...`);
+    const response = await axios({
+      method: 'GET',
+      url: downloadUrl,
+      responseType: 'stream'
+    });
+
+    await streamPipeline(response.data, fs.createWriteStream(localFilePath));
+    console.log(`[sb] Download complete.`);
+
+    // 3. Play Local File
+    const resource = createAudioResource(localFilePath, { 
       inputType: StreamType.Arbitrary,
       inlineVolume: true 
     });
     resource.volume.setVolume(1.0);
     
+    // Assign file to queue so Idle event can delete it later
+    q.currentFile = localFilePath;
     q.player.play(resource);
 
     if (textChannel && textChannel.send) {
@@ -446,19 +429,25 @@ async function sbPlayNext(guild, textChannel = null) {
       }).catch(()=>{});
     }
     await sbUpdatePanel(guild);
+
   } catch (e) {
     console.error("[sb playNext error]", e);
-    // NOTIFY USER OF FAILURE
+    
+    // Cleanup failed download if it exists
+    if (localFilePath && fs.existsSync(localFilePath)) {
+        fs.unlink(localFilePath, ()=>{});
+    }
+
     if (textChannel) {
         textChannel.send(`⚠️ **${next.name}** failed to load. Skipping...`).catch(()=>{});
     }
     q.now = null;
-    // Skip to next if this one failed
+    // Try next one
     setTimeout(()=> sbPlayNext(guild, textChannel).catch(()=>{}), 1000);
   }
 }
 
-// ---------- connect to VC (used by play & panel connect) ----------
+// ---------- connect to VC ----------
 async function sbConnectToMember(member) {
   if (!member.voice.channel) return { error: "not_in_vc" };
   const vc = member.voice.channel;
@@ -473,7 +462,7 @@ async function sbConnectToMember(member) {
     });
 
     try {
-      await entersState(conn, VoiceConnectionStatus.Ready, 15_000); // Wait for handshake
+      await entersState(conn, VoiceConnectionStatus.Ready, 15_000);
     } catch (err) {
       console.error("[sb connect] Connection never became ready", err);
       conn.destroy();
@@ -483,10 +472,6 @@ async function sbConnectToMember(member) {
     const q = getSbQueue(guild.id);
     q.vcId = vc.id;
     
-    conn.on('stateChange', (oldState, newState) => {
-      console.log(`[Connection] ${oldState.status} -> ${newState.status}`);
-    });
-
     if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
     conn.subscribe(q.player);
     return { connection: conn, channel: vc };
@@ -504,20 +489,23 @@ async function sbUpdatePanel(guild) {
     if (!ch) return;
     const msg = await ch.messages.fetch(panel.messageId).catch(()=>null);
     if (!msg) return;
-    const ui = await buildSoundPanelEmbed(guild, panel.page || 0);
+    const ui = await buildSoundPanelEmbed(guild);
     await msg.edit({ embeds: [ui.embed], components: ui.buttons }).catch(()=>{});
   } catch (e) { console.error("[sbUpdatePanel]", e); }
 }
 
 
-// ---------- Sound Panel builder ----------
-async function buildSoundPanelEmbed(guild, page = 0) {
+// ---------- Sound Panel builder (NO PREV/NEXT) ----------
+async function buildSoundPanelEmbed(guild) {
   const q = getSbQueue(guild.id);
   const total = await Sound.countDocuments({ guildId: guild.id }).catch(()=>0);
 
   const status = q.now ? "🟢 ᴘʟᴀʏɪɴɢ" : (getVoiceConnection(guild.id) ? "🟡 ᴄᴏɴɴᴇᴄᴛᴇᴅ" : "🔴 ɪᴅʟᴇ");
   const nowPlaying = q.now ? `🎧 ${q.now.name}` : "—";
-  const queuePreview = q.list.length ? q.list.slice(0,5).map((s,i)=> `\`${i+1}.\` ${s.name}`).join("\n") : toSmallCaps("ɴᴏ ǫᴜᴇᴜᴇᴅ sᴏᴜɴᴅs");
+  
+  // Show more items in preview since pagination is gone
+  const queuePreview = q.list.length ? q.list.slice(0, 8).map((s,i)=> `\`${i+1}.\` ${s.name}`).join("\n") : toSmallCaps("ɴᴏ ǫᴜᴇᴜᴇᴅ sᴏᴜɴᴅs");
+  if (q.list.length > 8) queuePreview += `\n...and ${q.list.length - 8} more`;
 
   const embed = new EmbedBuilder()
     .setColor(EmbedColors.VC_JOIN)
@@ -526,7 +514,7 @@ async function buildSoundPanelEmbed(guild, page = 0) {
       `${toSmallCaps("> sᴛᴀᴛᴜs:")} ${toSmallCaps(status)}\n` +
       `${toSmallCaps("> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:")} ${toSmallCaps(nowPlaying)}\n` +
       `${toSmallCaps("> ᴛᴏᴛᴀʟ sᴏᴜɴᴅs:")} ${total}\n\n` +
-      `${toSmallCaps("📜 ǫᴜᴇᴜᴇ (preview):")}\n${toSmallCaps(queuePreview)}`
+      `${toSmallCaps("📜 ǫᴜᴇᴜᴇ:")}\n${toSmallCaps(queuePreview)}`
     )
     .setFooter({ text: toSmallCaps(guild.name) })
     .setTimestamp();
@@ -538,12 +526,7 @@ async function buildSoundPanelEmbed(guild, page = 0) {
     new ButtonBuilder().setCustomId("sb_refresh").setLabel(toSmallCaps("ʀᴇꜰʀᴇsʜ")).setStyle(ButtonStyle.Secondary)
   );
 
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`sb_prev_${page}`).setLabel(toSmallCaps("⬅ ᴘʀᴇᴠ")).setStyle(ButtonStyle.Secondary).setDisabled(true),
-    new ButtonBuilder().setCustomId(`sb_next_${page}`).setLabel(toSmallCaps("ɴᴇxᴛ ➡")).setStyle(ButtonStyle.Secondary).setDisabled(true)
-  );
-
-  return { embed, buttons: [row1, row2] };
+  return { embed, buttons: [row1] };
 }
 
 // ---------- Discord client ----------
@@ -570,7 +553,7 @@ const EmbedColors = {
   RESET: 0x00ccff
 };
 
-// ---------- Reusable embed builder (small-caps everywhere) ----------
+// ---------- Reusable embed builder ----------
 function makeEmbed({ title, description, color = EmbedColors.INFO, guild }) {
   const e = new EmbedBuilder()
     .setColor(color)
@@ -584,7 +567,7 @@ function makeEmbed({ title, description, color = EmbedColors.INFO, guild }) {
   return e;
 }
 
-// ---------- Control Panel builder (small-caps labels) ----------
+// ---------- Control Panel builder ----------
 function buildControlPanel(settings, guild) {
   const embed = new EmbedBuilder()
     .setColor(settings.alertsEnabled ? EmbedColors.SUCCESS : EmbedColors.ERROR)
@@ -607,7 +590,6 @@ function buildControlPanel(settings, guild) {
     .setFooter({ text: toSmallCaps(guild?.name || `Server ID: ${settings.guildId}`), iconURL: guild?.iconURL?.({ dynamic: true }) || client.user.displayAvatarURL() })
     .setTimestamp();
 
-  // Buttons with small-caps labels
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('toggleJoinAlerts').setLabel(toSmallCaps('👋 Join')).setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('toggleLeaveAlerts').setLabel(toSmallCaps('🏃‍♂️ Leave')).setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
@@ -830,18 +812,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const res = await sbConnectToMember(interaction.member);
             if (res?.error) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ")).setDescription(toSmallCaps("join a voice channel to play sounds")).setTimestamp() ], flags: 64 });
 
-            // SMART NOTIFICATION LOGIC
             const isIdle = !q.now; 
             
             q.list.push({ name: sound.name, fileURL: sound.fileURL, storageMessageId: sound.storageMessageId });
             
             if (isIdle) {
                await sbPlayNext(guild, interaction.channel);
-               // If it was idle, we just started playing it.
                return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("▶️ ɴᴏᴡ ᴘʟᴀʏɪɴɢ")).setDescription(toSmallCaps(`**${sound.name}**`)).setTimestamp() ] });
             } else {
                await sbUpdatePanel(guild);
-               // It was busy, so it's queued.
                const pos = q.list.length;
                return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("🎶 ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ")).setDescription(toSmallCaps(`**${sound.name}** is at position #${pos}`)).setTimestamp() ] });
             }
@@ -876,9 +855,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // ----- /sound panel -----
           if (sub === "panel") {
             if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], flags: 64 });
-            const ui = await buildSoundPanelEmbed(guild, 0);
+            const ui = await buildSoundPanelEmbed(guild);
             const msg = await interaction.reply({ embeds: [ui.embed], components: ui.buttons, withResponse: true });
-            sbPanels.set(guildId, { messageId: msg.id, channelId: msg.channelId, page: 0 });
+            sbPanels.set(guildId, { messageId: msg.id, channelId: msg.channelId });
             return;
           }
           return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("sound — usage")).setDescription(toSmallCaps("/sound add|play|delete|list|panel")).setTimestamp() ], flags: 64 });
@@ -936,15 +915,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await sbUpdatePanel(guild);
           return interaction.deferUpdate();
         }
-        if (customId === "sb_skip") { try { q.player.stop(); } catch(_) {} await sbUpdatePanel(guild); return interaction.deferUpdate(); }
-        if (customId === "sb_stop") { q.list = []; q.now = null; try { q.player.stop(true); } catch(_) {} const conn = getVoiceConnection(guildId); if (conn) conn.destroy(); q.vcId = null; await sbUpdatePanel(guild); return interaction.deferUpdate(); }
-        if (customId.startsWith("sb_prev_") || customId.startsWith("sb_next_")) {
-          const parts = customId.split("_");
-          const cur = Number(parts[2]) || 0;
-          const newPage = customId.startsWith("sb_prev_") ? Math.max(0, cur - 1) : cur + 1;
-          sbPanels.set(guildId, { ...(sbPanels.get(guildId) || {}), page: newPage });
-          const ui = await buildSoundPanelEmbed(guild, newPage);
-          return interaction.update({ embeds: [ui.embed], components: ui.buttons });
+        if (customId === "sb_skip") { 
+            try { q.player.stop(); } catch(_) {} 
+            await sbUpdatePanel(guild); 
+            return interaction.deferUpdate(); 
+        }
+        if (customId === "sb_stop") { 
+            q.list = []; 
+            // Cleanup current file if manual stop
+            if (q.currentFile && fs.existsSync(q.currentFile)) {
+                fs.unlink(q.currentFile, ()=>{});
+                q.currentFile = null;
+            }
+            q.now = null; 
+            try { q.player.stop(true); } catch(_) {} 
+            const conn = getVoiceConnection(guildId); 
+            if (conn) conn.destroy(); 
+            q.vcId = null; 
+            await sbUpdatePanel(guild); 
+            return interaction.deferUpdate(); 
         }
       }
 
@@ -1102,6 +1091,10 @@ async function shutdown(signal) {
       pendingSaveQueue.clear();
       await Promise.all(entries.map(([guildId, settings]) => GuildSettings.findOneAndUpdate({ guildId }, settings, { upsert: true, setDefaultsOnInsert: true }).exec().catch(e => console.error(`[DB] Shutdown save failed for ${guildId}:`, e?.message ?? e))));
     }
+    // Cleanup Temp Dir
+    const files = fs.readdirSync(TEMP_DIR);
+    for (const file of files) fs.unlinkSync(path.join(TEMP_DIR, file));
+    
     for (const t of threadDeletionTimeouts.values()) clearTimeout(t);
     threadDeletionTimeouts.clear();
     activeVCThreads.clear();
