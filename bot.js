@@ -994,7 +994,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // Re-draw panel using the updated `settings` object
         const updatedPanel = buildControlPanel(settings, guild);
-        return interaction.update({ embeds: [updatedPanel.embed], components: [updatedPanel.buttons] });
+        return interaction.update({ embeds: [updatedPanel.embed], components: updatedPanel.buttons });
 
       } catch (error) {
         console.error("Button Interaction Error:", error);
