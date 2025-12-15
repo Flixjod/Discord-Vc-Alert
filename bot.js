@@ -866,81 +866,143 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } 
 
     if (interaction.isButton()) {
+      // 1. Setup & Safety Checks
+      const { guild, guildId, member, customId } = interaction;
+      if (!guild) return; 
+      
+      // Check Admin permissions
       if (!await checkAdmin(interaction)) return;
-      const customId = interaction.customId;
-      const settingsToUpdate = await getGuildSettings(guildId);
 
-      switch (customId) {
-        case "toggleLeaveAlerts": settingsToUpdate.leaveAlerts = !settingsToUpdate.leaveAlerts; break;
-        case "toggleJoinAlerts": settingsToUpdate.joinAlerts = !settingsToUpdate.joinAlerts; break;
-        case "toggleOnlineAlerts": settingsToUpdate.onlineAlerts = !settingsToUpdate.onlineAlerts; break;
-        case "togglePrivateThreads": settingsToUpdate.privateThreadAlerts = !settingsToUpdate.privateThreadAlerts; break;
-        case "toggleAutoDelete": settingsToUpdate.autoDelete = !settingsToUpdate.autoDelete; break;
-        case "toggleIgnoreRole": settingsToUpdate.ignoreRoleEnabled = !settingsToUpdate.ignoreRoleEnabled; break;
-        case "resetSettings": {
-          const confirmRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Yes, Reset").setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ No, Cancel").setStyle(ButtonStyle.Secondary)
-          );
-          await interaction.update({ embeds: [ makeEmbed({ title: toSmallCaps("⚠️ Confirm Reset"), description: toSmallCaps("You are about to reset all VC alert settings. Proceed?"), color: EmbedColors.WARNING, guild }) ], components: [confirmRow] });
-          return;
-        }
-        case "confirmReset": {
-          try {
-            await GuildSettings.deleteOne({ guildId });
-            guildSettingsCache.delete(guildId);
-            const newSettings = await getGuildSettings(guildId);
-            const panel = buildControlPanel(newSettings, guild);
-            await interaction.update({ embeds: [panel.embed], components: [panel.buttons] });
-            await interaction.followUp({ content: toSmallCaps("🎉 VC Alert Settings Reset!"), flags: 64 });
-          } catch (e) { console.error("[confirmReset]", e); await interaction.followUp({ content: toSmallCaps("❌ error while resetting"), flags: 64 }); }
-          return;
-        }
-        case "cancelReset": {
-          const currentSettings = await getGuildSettings(guildId);
-          const panel = buildControlPanel(currentSettings, guild);
-          await interaction.update({ embeds: [panel.embed], components: [panel.buttons] });
-          return;
-        }
-      }
+      try {
+        if (customId.startsWith("sb_")) {
+          const q = getSbQueue(guildId);
+          
+          // Safety: If queue is missing (bot restarted), warn user unless connecting
+          if (!q && customId !== "sb_connect") {
+             return interaction.reply({ content: toSmallCaps("⚠️ Player not active. Click Connect."), flags: 64 });
+          }
 
-      if (customId.startsWith("sb_")) {
-        const q = getSbQueue(guildId);
-        if (customId === "sb_refresh") { await sbUpdatePanel(guild); return interaction.deferUpdate(); }
-        if (customId === "sb_connect") {
-          const res = await sbConnectToMember(interaction.member);
-          if (res?.error) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 ᴊᴏɴ ᴀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ")).setDescription(toSmallCaps("join a voice channel to connect")).setTimestamp() ], flags: 64 });
-          q.vcId = res.channel.id;
-          if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
-          await sbUpdatePanel(guild);
-          return interaction.deferUpdate();
-        }
-        if (customId === "sb_skip") { 
-            try { q.player.stop(); } catch(_) {} 
+          if (customId === "sb_refresh") { 
             await sbUpdatePanel(guild); 
             return interaction.deferUpdate(); 
-        }
-        if (customId === "sb_stop") { 
+          }
+          
+          if (customId === "sb_connect") {
+            const res = await sbConnectToMember(member);
+            if (res?.error) {
+              return interaction.reply({ 
+                embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 Connection Failed")).setDescription(toSmallCaps("Join a voice channel first.")).setTimestamp() ], 
+                flags: 64 
+              });
+            }
+            const queue = getSbQueue(guildId);
+            queue.vcId = res.channel.id;
+            if (queue.timeout) { clearTimeout(queue.timeout); queue.timeout = null; }
+            await sbUpdatePanel(guild);
+            return interaction.deferUpdate();
+          }
+
+          if (customId === "sb_skip") { 
+            try { q.player.stop(); } catch(e) {} 
+            await sbUpdatePanel(guild); 
+            return interaction.deferUpdate(); 
+          }
+
+          if (customId === "sb_stop") { 
             q.list = []; 
-            // Cleanup current file if manual stop
+            // Delete local file if exists
             if (q.currentFile && fs.existsSync(q.currentFile)) {
-                fs.unlink(q.currentFile, ()=>{});
+                fs.unlink(q.currentFile, (e) => {});
                 q.currentFile = null;
             }
-            q.now = null; 
-            try { q.player.stop(true); } catch(_) {} 
+            q.now = null;
+            try { q.player.stop(true); } catch(e) {} 
+            
             const conn = getVoiceConnection(guildId); 
             if (conn) conn.destroy(); 
             q.vcId = null; 
+            
             await sbUpdatePanel(guild); 
             return interaction.deferUpdate(); 
+          }
+          return interaction.deferUpdate(); // Catch-all
+        }
+
+
+        // Fetch current settings (Uses your cache system)
+        let settings = await getGuildSettings(guildId);
+        if (!settings) return interaction.reply({ content: "❌ Database error: Settings not found.", flags: 64 });
+
+        let didChange = false;
+
+        switch (customId) {
+          // Toggles: Update local object immediately for UI speed
+          case "toggleLeaveAlerts": settings.leaveAlerts = !settings.leaveAlerts; didChange = true; break;
+          case "toggleJoinAlerts": settings.joinAlerts = !settings.joinAlerts; didChange = true; break;
+          case "toggleOnlineAlerts": settings.onlineAlerts = !settings.onlineAlerts; didChange = true; break;
+          case "togglePrivateThreads": settings.privateThreadAlerts = !settings.privateThreadAlerts; didChange = true; break;
+          case "toggleAutoDelete": settings.autoDelete = !settings.autoDelete; didChange = true; break;
+          case "toggleIgnoreRole": settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled; didChange = true; break;
+          
+          // Reset Flow
+          case "resetSettings": {
+            const confirmRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Yes, Reset").setStyle(ButtonStyle.Danger),
+              new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ No, Cancel").setStyle(ButtonStyle.Secondary)
+            );
+            return interaction.update({ 
+              embeds: [ makeEmbed({ title: toSmallCaps("⚠️ Confirm Reset"), description: toSmallCaps("Reset all VC alert settings?"), color: EmbedColors.WARNING, guild }) ], 
+              components: [confirmRow] 
+            });
+          }
+          case "confirmReset": {
+            await GuildSettings.deleteOne({ guildId });
+            guildSettingsCache.delete(guildId); // Clear cache
+            
+            // Re-fetch defaults
+            settings = await getGuildSettings(guildId); 
+            const panel = buildControlPanel(settings, guild);
+            await interaction.update({ embeds: [panel.embed], components: [panel.buttons] });
+            return interaction.followUp({ content: toSmallCaps("🎉 Settings Reset!"), flags: 64 });
+          }
+          case "cancelReset": {
+            // Just re-render logic below
+            break; 
+          }
+          default:
+            return; // Unknown button
+        }
+
+
+        if (didChange) {
+            // 1. Update Cache
+            guildSettingsCache.set(guildId, settings);
+
+            // 2. Force Database Update (Background)
+            // We use specific $set to ensure atomic updates
+            GuildSettings.updateOne({ guildId }, { 
+                $set: { 
+                    leaveAlerts: settings.leaveAlerts,
+                    joinAlerts: settings.joinAlerts,
+                    onlineAlerts: settings.onlineAlerts,
+                    privateThreadAlerts: settings.privateThreadAlerts,
+                    autoDelete: settings.autoDelete,
+                    ignoreRoleEnabled: settings.ignoreRoleEnabled
+                }
+            }).catch(e => console.error(`[Button DB Save Error] ${guildId}:`, e));
+        }
+
+        // Re-draw panel using the updated `settings` object
+        const updatedPanel = buildControlPanel(settings, guild);
+        return interaction.update({ embeds: [updatedPanel.embed], components: [updatedPanel.buttons] });
+
+      } catch (error) {
+        console.error("Button Interaction Error:", error);
+        if (!interaction.replied && !interaction.deferred) {
+            return interaction.reply({ content: "❌ An internal error occurred.", flags: 64 });
         }
       }
-
-      await updateGuildSettings(settingsToUpdate);
-      const updatedPanel = buildControlPanel(settingsToUpdate, guild);
-      return interaction.update({ embeds: [updatedPanel.embed], components: [updatedPanel.buttons] });
-    } 
+    }
 
     if (interaction.isAutocomplete()) {
       if (interaction.commandName !== "sound") return;
