@@ -3,7 +3,7 @@ import fs from "fs";
 const fsp = fs.promises;
 import path from "path";
 import { fileURLToPath } from "url";
-import axios from "axios"; // Required for downloading
+import axios from "axios"; 
 import { pipeline } from "stream";
 import { promisify } from "util";
 const streamPipeline = promisify(pipeline);
@@ -208,8 +208,8 @@ async function generateActivityFile(guild, logs) {
   const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
   const header =
 `╔══════════════════════════════════════════════╗
-║           🌌 ${toSmallCaps(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
-║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toSmallCaps(toISTString(Date.now()))}     ║
+║           🌌 ${toSmallCaps(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
+║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toSmallCaps(toISTString(Date.now()))}     ║
 ╚══════════════════════════════════════════════╝
 
 `;
@@ -225,7 +225,6 @@ async function generateActivityFile(guild, logs) {
   return filePath;
 }
 
-
 // ---------- Sound model ----------
 const soundSchema = new mongoose.Schema({
   guildId: { type: String, required: true, index: true },
@@ -233,13 +232,16 @@ const soundSchema = new mongoose.Schema({
   fileURL: { type: String, required: true },
   storageMessageId: { type: String, default: null },
   addedBy: { type: String, default: null },
+  playCount: { type: Number, default: 0 }, // NEW: Track Popularity
   createdAt: { type: Date, default: Date.now }
 });
 const Sound = mongoose.model("Soundboards", soundSchema);
 
 // ---------- In-memory queue & panels ----------
-const sbQueues = new Map();   // guildId -> { player, list[], now, vcId, timeout, lastTextChannel, currentFile }
-const sbPanels = new Map();   // guildId -> { messageId, channelId } (Removed Page)
+const sbQueues = new Map();   // guildId -> { player, list[], now, vcId, timeout, lastTextChannel, currentFile, volume, resource }
+const sbPanels = new Map();   // guildId -> { messageId, channelId }
+
+
 
 // ---------- queue helper (Enhanced Debug & Auto-Recovery) ----------
 function getSbQueue(guildId) {
@@ -253,7 +255,9 @@ function getSbQueue(guildId) {
       timeout: null,
       guildId: guildId,
       lastTextChannel: null,
-      currentFile: null // TRACKS CURRENT LOCAL FILE
+      currentFile: null,
+      volume: 1.0, // Default Volume
+      resource: null // Track active resource for volume control
     };
 
     // DEBUG: Monitor player state
@@ -272,6 +276,7 @@ function getSbQueue(guildId) {
     // Event: Track finished (Idle)
     player.on(AudioPlayerStatus.Idle, async () => {
       try {
+        q.resource = null; // Clear resource ref
         // DELETE LOCAL FILE
         if (q.currentFile && fs.existsSync(q.currentFile)) {
             try {
@@ -304,7 +309,6 @@ function getSbQueue(guildId) {
             content: `⚠️ **${q.now?.name || 'Track'}** failed. Skipping...` 
         }).catch(()=>{});
       }
-      // Force skip triggers idle, which triggers cleanup
       q.player.stop(); 
     });
 
@@ -331,6 +335,7 @@ function startSbLeaveTimer(guildId) {
     q.list = [];
     q.now = null;
     q.vcId = null;
+    q.resource = null;
   }, 10 * 60 * 1000);
 }
 
@@ -369,6 +374,11 @@ async function sbPlayNext(guild, textChannel = null) {
 
   const next = q.list.shift();
   q.now = next;
+
+  // Increment Play Count
+  if (next._id) {
+    Sound.updateOne({ _id: next._id }, { $inc: { playCount: 1 } }).catch(() => {});
+  }
 
   let localFilePath = null;
 
@@ -411,10 +421,11 @@ async function sbPlayNext(guild, textChannel = null) {
       inputType: StreamType.Arbitrary,
       inlineVolume: true 
     });
-    resource.volume.setVolume(1.0);
+    resource.volume.setVolume(q.volume);
     
     // Assign file to queue so Idle event can delete it later
     q.currentFile = localFilePath;
+    q.resource = resource; // Store ref for volume control
     q.player.play(resource);
 
     if (textChannel && textChannel.send) {
@@ -424,6 +435,7 @@ async function sbPlayNext(guild, textChannel = null) {
             .setColor(EmbedColors.VC_JOIN)
             .setTitle(toSmallCaps("🎧 ɴᴏᴡ ᴘʟᴀʏɪɴɢ"))
             .setDescription(toSmallCaps(`**${next.name}**`))
+            .setFooter({ text: `Volume: ${Math.round(q.volume * 100)}%` })
             .setTimestamp()
         ]
       }).catch(()=>{});
@@ -495,7 +507,7 @@ async function sbUpdatePanel(guild) {
 }
 
 
-// ---------- Sound Panel builder (NO PREV/NEXT) ----------
+// ---------- Sound Panel builder ----------
 async function buildSoundPanelEmbed(guild) {
   const q = getSbQueue(guild.id);
   const total = await Sound.countDocuments({ guildId: guild.id }).catch(()=>0);
@@ -503,7 +515,6 @@ async function buildSoundPanelEmbed(guild) {
   const status = q.now ? "🟢 ᴘʟᴀʏɪɴɢ" : (getVoiceConnection(guild.id) ? "🟡 ᴄᴏɴɴᴇᴄᴛᴇᴅ" : "🔴 ɪᴅʟᴇ");
   const nowPlaying = q.now ? `🎧 ${q.now.name}` : "—";
   
-  // Show more items in preview since pagination is gone
   const queuePreview = q.list.length ? q.list.slice(0, 8).map((s,i)=> `\`${i+1}.\` ${s.name}`).join("\n") : toSmallCaps("ɴᴏ ǫᴜᴇᴜᴇᴅ sᴏᴜɴᴅs");
   if (q.list.length > 8) queuePreview += `\n...and ${q.list.length - 8} more`;
 
@@ -512,6 +523,7 @@ async function buildSoundPanelEmbed(guild) {
     .setAuthor({ name: toSmallCaps("🎛 sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
     .setDescription(
       `${toSmallCaps("> sᴛᴀᴛᴜs:")} ${toSmallCaps(status)}\n` +
+      `${toSmallCaps("> ᴠᴏʟᴜᴍᴇ:")} ${Math.round(q.volume * 100)}%\n` +
       `${toSmallCaps("> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:")} ${toSmallCaps(nowPlaying)}\n` +
       `${toSmallCaps("> ᴛᴏᴛᴀʟ sᴏᴜɴᴅs:")} ${total}\n\n` +
       `${toSmallCaps("📜 ǫᴜᴇᴜᴇ:")}\n${toSmallCaps(queuePreview)}`
@@ -649,6 +661,10 @@ const commands = [
       .addStringOption(o => o.setName("name").setDescription("sᴇʟᴇᴄᴛ").setAutocomplete(true).setRequired(true)))
     .addSubcommand(s => s.setName("list").setDescription("📜 ʟɪsᴛ"))
     .addSubcommand(s => s.setName("panel").setDescription("🎛 ᴏᴘᴇɴ ᴘᴀɴᴇʟ"))
+    // NEW COMMANDS ADDED BELOW
+    .addSubcommand(s => s.setName("volume").setDescription("🔊 sᴇᴛ ᴠᴏʟᴜᴍᴇ")
+      .addIntegerOption(o => o.setName("level").setDescription("0 - 100").setRequired(true).setMinValue(0).setMaxValue(100)))
+    .addSubcommand(s => s.setName("top").setDescription("🏆 ᴍᴏsᴛ ᴘʟᴀʏᴇᴅ sᴏᴜɴᴅs"))
 ].map(c => c.toJSON());
 
 // ---------- Ready & register commands ----------
@@ -814,7 +830,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             const isIdle = !q.now; 
             
-            q.list.push({ name: sound.name, fileURL: sound.fileURL, storageMessageId: sound.storageMessageId });
+            q.list.push({ _id: sound._id, name: sound.name, fileURL: sound.fileURL, storageMessageId: sound.storageMessageId });
             
             if (isIdle) {
                await sbPlayNext(guild, interaction.channel);
@@ -824,6 +840,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
                const pos = q.list.length;
                return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("🎶 ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ")).setDescription(toSmallCaps(`**${sound.name}** is at position #${pos}`)).setTimestamp() ] });
             }
+          }
+
+          // ----- /sound volume (NEW) -----
+          if (sub === "volume") {
+            const level = interaction.options.getInteger("level");
+            const newVol = level / 100;
+            q.volume = newVol;
+            
+            // Adjust current resource if playing
+            if (q.resource && q.resource.volume) {
+                q.resource.volume.setVolume(newVol);
+            }
+            await sbUpdatePanel(guild);
+            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ")).setDescription(toSmallCaps(`Volume set to **${level}%**`)).setTimestamp() ], flags: 64 });
+          }
+
+          // ----- /sound top (NEW) -----
+          if (sub === "top") {
+             const docs = await Sound.find({ guildId }).sort({ playCount: -1 }).limit(10);
+             if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds played yet")).setTimestamp() ], flags: 64 });
+             
+             const text = docs.map((s, idx) => {
+                 const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `\`#${idx+1}\``;
+                 return `${medal} **${s.name}** — ${s.playCount} plays`;
+             }).join("\n");
+
+             return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("🏆 ᴍᴏsᴛ ᴘᴏᴘᴜʟᴀʀ sᴏᴜɴᴅs")).setDescription(toSmallCaps(text)).setTimestamp() ], flags: 64 });
           }
 
           // ----- /sound delete -----
@@ -848,8 +891,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (sub === "list") {
             const docs = await Sound.find({ guildId }).sort({ name: 1 });
             if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds added")).setTimestamp() ], flags: 64 });
-            const text = docs.map((s, idx) => `\`${idx+1}.\` **${s.name}** — <@${s.addedBy}>`).join("\n");
-            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(toSmallCaps(text)).setFooter({ text: toSmallCaps(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp() ], flags: 64 });
+            // Limit text size
+            const text = docs.slice(0, 40).map((s, idx) => `\`${idx+1}.\` **${s.name}**`).join("\n");
+            const more = docs.length > 40 ? `\n...and ${docs.length - 40} more` : "";
+            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(toSmallCaps(text + more)).setFooter({ text: toSmallCaps(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp() ], flags: 64 });
           }
 
           // ----- /sound panel -----
@@ -860,7 +905,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             sbPanels.set(guildId, { messageId: msg.id, channelId: msg.channelId });
             return;
           }
-          return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("sound — usage")).setDescription(toSmallCaps("/sound add|play|delete|list|panel")).setTimestamp() ], flags: 64 });
+          return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("sound — usage")).setDescription(toSmallCaps("/sound add|play|delete|list|panel|volume|top")).setTimestamp() ], flags: 64 });
         }
       }
     } 
