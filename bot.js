@@ -120,15 +120,16 @@ const guildSettingsSchema = new mongoose.Schema({
 const GuildSettings = mongoose.model("GuildSettings", guildSettingsSchema);
 
 const logSchema = new mongoose.Schema({
-  guildId: String,
+  guildId: { type: String, required: true, index: true },
   guildName: String,
-  user: String,
+  user: { type: String, required: true },
   channel: String,
-  type: String,
-  time: { type: Date, default: Date.now }
+  type: { type: String, required: true, enum: ["join", "leave", "online"] },
+  time: { type: Date, default: Date.now, index: true }
 });
 logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
 logSchema.index({ guildId: 1, time: -1 });
+logSchema.index({ guildId: 1, user: 1, time: -1 });
 const GuildLog = mongoose.model("GuildLog", logSchema);
 
 // ---------- In-memory caches & debounced writer ----------
@@ -163,7 +164,7 @@ async function updateGuildSettings(settings) {
 async function getGuildSettings(guildId) {
   const cached = guildSettingsCache.get(guildId);
   if (cached) return cached;
-  let settings = await GuildSettings.findOne({ guildId }).lean().catch(() => null);
+  let settings = await GuildSettings.findOne({ guildId }).lean().select('-__v').catch(() => null);
   if (!settings) {
     settings = {
       guildId,
@@ -232,9 +233,11 @@ const soundSchema = new mongoose.Schema({
   fileURL: { type: String, required: true },
   storageMessageId: { type: String, default: null },
   addedBy: { type: String, default: null },
-  playCount: { type: Number, default: 0 }, // NEW: Track Popularity
+  playCount: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
 });
+soundSchema.index({ guildId: 1, name: 1 }, { unique: true });
+soundSchema.index({ guildId: 1, playCount: -1 });
 const Sound = mongoose.model("Soundboards", soundSchema);
 
 // ---------- In-memory queue & panels ----------
@@ -771,20 +774,65 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         case "logs": {
           await interaction.deferReply({ flags: 64 });
-          const logs = await GuildLog.find({ guildId: guild.id }).sort({ time: -1 }).limit(20).lean();
+          
+          // Get range and user options
+          const rangeOpt = interaction.options.getString("range") || "today";
+          const userOpt = interaction.options.getUser("user");
+          
+          // Calculate date range
+          const now = Date.now();
+          let startTime;
+          switch (rangeOpt) {
+            case "today":
+              const todayStart = new Date();
+              todayStart.setHours(0, 0, 0, 0);
+              startTime = todayStart.getTime();
+              break;
+            case "yesterday":
+              const yesterdayStart = new Date();
+              yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+              yesterdayStart.setHours(0, 0, 0, 0);
+              startTime = yesterdayStart.getTime();
+              const yesterdayEnd = new Date(yesterdayStart);
+              yesterdayEnd.setHours(23, 59, 59, 999);
+              break;
+            case "7days":
+              startTime = now - (7 * 24 * 60 * 60 * 1000);
+              break;
+            case "30days":
+              startTime = now - (30 * 24 * 60 * 60 * 1000);
+              break;
+            default:
+              startTime = now - (24 * 60 * 60 * 1000);
+          }
+          
+          // Build query
+          const query = { guildId: guild.id, time: { $gte: new Date(startTime) } };
+          if (rangeOpt === "yesterday") {
+            const yesterdayEnd = new Date();
+            yesterdayEnd.setHours(0, 0, 0, 0);
+            query.time.$lt = yesterdayEnd;
+          }
+          if (userOpt) {
+            query.user = { $regex: `^${userOpt.tag}`, $options: "i" };
+          }
+          
+          const logs = await GuildLog.find(query).sort({ time: -1 }).limit(100).lean();
 
           if (logs.length === 0) {
-            return interaction.editReply({ embeds: [makeEmbed({ title: toSmallCaps("No recent activity found"), description: toSmallCaps(""), color: EmbedColors.INFO, guild })] });
+            return interaction.editReply({ embeds: [makeEmbed({ title: "No activity found", description: `No logs found for the selected ${userOpt ? 'user and ' : ''}time range.`, color: EmbedColors.INFO, guild })] });
           }
 
-          const desc = logs.map(l => {
+          const desc = logs.slice(0, 20).map(l => {
             const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
             const ago = fancyAgo(Date.now() - l.time);
             const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
             return `**${emoji} ${l.type.toUpperCase()}** — ${l.user} ${action} ${l.channel}\n> 🕒 ${ago} • ${toISTString(l.time)}`;
           }).join("\n\n");
 
-          const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(toSmallCaps(`${guild.name} recent activity`)).setDescription(toSmallCaps(desc)).setFooter({ text: toSmallCaps(`Showing latest ${logs.length} entries • Server: ${guild.name}`) }).setTimestamp();
+          const rangeText = rangeOpt === "today" ? "Today" : rangeOpt === "yesterday" ? "Yesterday" : rangeOpt === "7days" ? "Last 7 Days" : "Last 30 Days";
+          const userText = userOpt ? ` for ${userOpt.tag}` : "";
+          const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(`${guild.name} Activity - ${rangeText}${userText}`).setDescription(desc).setFooter({ text: `Showing ${Math.min(20, logs.length)} of ${logs.length} entries • Server: ${guild.name}` }).setTimestamp();
           const filePath = await generateActivityFile(guild, logs);
           await interaction.followUp({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }], ephemeral: false });
           return;
@@ -858,7 +906,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           // ----- /sound top (NEW) -----
           if (sub === "top") {
-             const docs = await Sound.find({ guildId }).sort({ playCount: -1 }).limit(10);
+             const docs = await Sound.find({ guildId }).select('name playCount').sort({ playCount: -1 }).limit(10).lean();
              if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds played yet")).setTimestamp() ], flags: 64 });
              
              const text = docs.map((s, idx) => {
@@ -889,10 +937,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           // ----- /sound list -----
           if (sub === "list") {
-            const docs = await Sound.find({ guildId }).sort({ name: 1 });
+            const docs = await Sound.find({ guildId }).select('name playCount').sort({ name: 1 }).lean();
             if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds added")).setTimestamp() ], flags: 64 });
             // Limit text size
-            const text = docs.slice(0, 40).map((s, idx) => `\`${idx+1}.\` **${s.name}**`).join("\n");
+            const text = docs.slice(0, 40).map((s, idx) => `\`${idx+1}.\` **${s.name}** (${s.playCount} plays)`).join("\n");
             const more = docs.length > 40 ? `\n...and ${docs.length - 40} more` : "";
             return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(toSmallCaps(text + more)).setFooter({ text: toSmallCaps(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp() ], flags: 64 });
           }
@@ -1053,7 +1101,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.commandName !== "sound") return;
       const sub = interaction.options.getSubcommand();
       const focused = (interaction.options.getFocused() || "").toString().toLowerCase();
-      const sounds = await Sound.find({ guildId }).select("name").lean().catch(()=>[]);
+      const sounds = await Sound.find({ guildId }).select("name").limit(100).lean().catch(()=>[]);
       const names = sounds.map(s => s.name);
 
       if (sub === "add") {
@@ -1123,10 +1171,10 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     let embed;
     if (joined) {
       await addLog("join", user.tag, vc.name, guild);
-      embed = new EmbedBuilder().setColor(EmbedColors.VC_JOIN).setAuthor({ name: toSmallCaps(`${user.username} just popped in! 🔊`), iconURL: avatar }).setDescription(toSmallCaps(`🎧 ${user.username} joined ${vc.name} — let the vibes begin!`)).setFooter({ text: toSmallCaps("🎉 welcome to the voice party!"), iconURL: botAvatar }).setTimestamp();
+      embed = new EmbedBuilder().setColor(EmbedColors.VC_JOIN).setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar }).setDescription(`🎧 <@${user.id}> joined ${vc.name} — let the vibes begin!`).setFooter({ text: "🎉 welcome to the voice party!", iconURL: botAvatar }).setTimestamp();
     } else if (left) {
       await addLog("leave", user.tag, vc.name, guild);
-      embed = new EmbedBuilder().setColor(EmbedColors.VC_LEAVE).setAuthor({ name: toSmallCaps(`${user.username} dipped out! 🏃‍♂️`), iconURL: avatar }).setDescription(toSmallCaps(`👋 ${user.username} left ${vc.name} — see ya next time!`)).setFooter({ text: toSmallCaps("💨 gone but not forgotten."), iconURL: botAvatar }).setTimestamp();
+      embed = new EmbedBuilder().setColor(EmbedColors.VC_LEAVE).setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar }).setDescription(`👋 <@${user.id}> left ${vc.name} — see ya next time!`).setFooter({ text: "💨 gone but not forgotten.", iconURL: botAvatar }).setTimestamp();
     } else return;
 
     await withVCLock(vc.id, async () => {
@@ -1174,7 +1222,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
     const channel = await fetchTextChannel(member.guild, settings.textChannelId);
     if (!channel) return;
 
-    const embed = new EmbedBuilder().setColor(EmbedColors.ONLINE).setAuthor({ name: toSmallCaps(`${member.user.username} just came online! 🟢`), iconURL: member.user.displayAvatarURL({ dynamic: true }) }).setDescription(toSmallCaps(`👀 ${member.user.username} is now online — something's cooking!`)).setFooter({ text: toSmallCaps("✨ Ready to vibe!"), iconURL: client.user.displayAvatarURL() }).setTimestamp();
+    const embed = new EmbedBuilder().setColor(EmbedColors.ONLINE).setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) }).setDescription(`👀 <@${member.user.id}> is now online — something's cooking!`).setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() }).setTimestamp();
     await addLog("online", member.user.tag, "-", member.guild);
     const msg = await channel.send({ embeds: [embed] }).catch(e => console.warn(`Failed to send online alert for ${member.user.username}:`, e?.message ?? e));
     if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
