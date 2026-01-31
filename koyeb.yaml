@@ -1,0 +1,81 @@
+# Koyeb Deployment Configuration - Optimized for Performance
+# This configuration minimizes cold starts and improves alert latency
+
+services:
+  - name: discord-vc-alert-bot
+    type: web
+    
+    # Nano instance is sufficient for most small-medium Discord servers
+    # Upgrade to micro/small if you have >1000 members or heavy soundboard usage
+    instance_type: nano
+    
+    # Choose region closest to your MongoDB Atlas cluster
+    # Options: was (Washington), fra (Frankfurt), sin (Singapore), sfo (San Francisco)
+    regions:
+      - was  # US East - Change if your MongoDB is in a different region
+    
+    # Environment variables
+    env:
+      - key: TOKEN
+        value: ${TOKEN}  # Set this in Koyeb secrets
+      
+      - key: MONGO_URI
+        value: ${MONGO_URI}  # Set this in Koyeb secrets
+      
+      - key: PORT
+        value: "8000"
+      
+      - key: NODE_ENV
+        value: production
+      
+      # Discord.js optimizations
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=512"
+    
+    # Port configuration
+    ports:
+      - port: 8000
+        protocol: http
+    
+    # Health check - prevents cold starts
+    health_checks:
+      - http:
+          path: /
+          port: 8000
+          # Check every 30 seconds
+          interval_seconds: 30
+          # Timeout after 10 seconds
+          timeout_seconds: 10
+          # 2 successful checks = healthy
+          success_threshold: 2
+          # 3 failed checks = unhealthy
+          failure_threshold: 3
+    
+    # Routes
+    routes:
+      - path: /
+        port: 8000
+    
+    # Scaling configuration
+    autoscaling:
+      min: 1  # Always keep 1 instance running (prevents cold starts)
+      max: 1  # Single instance is sufficient for Discord bots
+    
+    # Build from Dockerfile
+    docker:
+      dockerfile: Dockerfile
+    
+    # Restart policy
+    restart_policy: on-failure
+    
+    # Resource limits (optional)
+    # resources:
+    #   memory: 512Mi
+    #   cpu: 0.1
+
+# Alternative: Deploy from GitHub
+# If you want auto-deploy on push:
+# git:
+#   repository: github.com/YOUR_USERNAME/Discord-Vc-Alert
+#   branch: main
+#   auto_deploy: true

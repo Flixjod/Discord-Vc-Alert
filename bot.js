@@ -153,7 +153,7 @@ function schedulePendingSaves() {
         console.error(`[DB SAVE] Failed to save settings for ${guildId}:`, e?.message ?? e);
       }
     }));
-  }, 700);
+  }, 300);
 }
 async function updateGuildSettings(settings) {
   if (!settings || !settings.guildId) return;
@@ -188,20 +188,19 @@ async function getGuildSettings(guildId) {
   return settings;
 }
 
-// ---------- Helper: log creation ----------
+// ---------- Helper: log creation (Non-blocking) ----------
 async function addLog(type, user, channel, guild) {
-  try {
-    await GuildLog.create({
-      guildId: guild.id ?? guild,
-      guildName: guild.name ?? guild,
-      user,
-      channel,
-      type,
-      time: Date.now()
-    });
-  } catch (err) {
+  // Fire and forget - don't block alert sending
+  GuildLog.create({
+    guildId: guild.id ?? guild,
+    guildName: guild.name ?? guild,
+    user,
+    channel,
+    type,
+    time: Date.now()
+  }).catch(err => {
     console.error(`[MongoDB Log Error] ${err?.message ?? err}`);
-  }
+  });
 }
 
 // ---------- Helper: generate activity file ----------
@@ -1170,10 +1169,10 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     const botAvatar = client.user.displayAvatarURL();
     let embed;
     if (joined) {
-      await addLog("join", user.tag, vc.name, guild);
+      addLog("join", user.tag, vc.name, guild); // Non-blocking
       embed = new EmbedBuilder().setColor(EmbedColors.VC_JOIN).setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar }).setDescription(`🎧 <@${user.id}> joined ${vc.name} — let the vibes begin!`).setFooter({ text: "🎉 welcome to the voice party!", iconURL: botAvatar }).setTimestamp();
     } else if (left) {
-      await addLog("leave", user.tag, vc.name, guild);
+      addLog("leave", user.tag, vc.name, guild); // Non-blocking
       embed = new EmbedBuilder().setColor(EmbedColors.VC_LEAVE).setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar }).setDescription(`👋 <@${user.id}> left ${vc.name} — see ya next time!`).setFooter({ text: "💨 gone but not forgotten.", iconURL: botAvatar }).setTimestamp();
     } else return;
 
@@ -1223,7 +1222,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
     if (!channel) return;
 
     const embed = new EmbedBuilder().setColor(EmbedColors.ONLINE).setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) }).setDescription(`👀 <@${member.user.id}> is now online — something's cooking!`).setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() }).setTimestamp();
-    await addLog("online", member.user.tag, "-", member.guild);
+    addLog("online", member.user.tag, "-", member.guild); // Non-blocking
     const msg = await channel.send({ embeds: [embed] }).catch(e => console.warn(`Failed to send online alert for ${member.user.username}:`, e?.message ?? e));
     if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
   } catch (e) { console.error("[presenceUpdate] Handler error:", e?.stack ?? e?.message ?? e); }
