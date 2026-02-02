@@ -2,14 +2,14 @@
 
 ## 🎯 Goal: <1 Second Alert Latency
 
-This document explains all optimizations applied to reduce alert delays from 1-2 minutes to <1 second.
+This document explains all optimizations applied to reduce alert delays and achieve sub-second response times.
 
 ---
 
 ## 📊 Performance Metrics
 
 ### Before Optimizations:
-- Alert Latency: 1-2 minutes ❌
+- Alert Latency: Variable (could be 1-120 seconds depending on deployment) ❌
 - Database Query Time: 200-500ms
 - Log Write Time: 100-200ms (blocking)
 - Cache Flush: 700ms delay
@@ -182,18 +182,20 @@ mongoose.connect(MONGO_URI, {
 
 ### 1. UptimeRobot Monitoring
 
-**Problem**: Koyeb cold starts take 30-60s.
+**Problem**: Free-tier deployments may spin down after inactivity (cold starts).
 
 **Solution**: Ping your bot every 5 minutes.
 
 1. Go to [uptimerobot.com](https://uptimerobot.com)
 2. Add monitor:
    - Type: HTTP(s)
-   - URL: `https://your-app.koyeb.app/`
+   - URL: `https://your-app-url/`
    - Interval: 5 minutes
 3. Save
 
 **Impact**: Zero cold starts = instant alerts
+
+**Note**: Only needed if your hosting platform has cold starts. VPS or always-on platforms don't need this.
 
 ---
 
