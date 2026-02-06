@@ -362,8 +362,8 @@ async function sbEnsureStorage(guild) {
   return channel;
 }
 
-// ---------- play next in queue (DOWNLOAD -> PLAY -> DELETE) ----------
-async function sbPlayNext(guild, textChannel = null) {
+// ---------- play next in queue (DOWNLOAD -> PLAY -> DELETE) with retry logic ----------
+async function sbPlayNext(guild, textChannel = null, retryCount = 0) {
   const q = getSbQueue(guild.id);
   if (textChannel) q.lastTextChannel = textChannel;
 
@@ -403,20 +403,44 @@ async function sbPlayNext(guild, textChannel = null) {
       }
     }
 
-    // 2. Download File
+    // 2. Download File with retry
     const fileExt = path.extname(new URL(downloadUrl).pathname) || ".mp3";
     const fileName = `${guild.id}_${Date.now()}${fileExt}`;
     localFilePath = path.join(TEMP_DIR, fileName);
 
     console.log(`[sb] Downloading ${next.name} to ${localFilePath}...`);
-    const response = await axios({
-      method: 'GET',
-      url: downloadUrl,
-      responseType: 'stream'
-    });
-
-    await streamPipeline(response.data, fs.createWriteStream(localFilePath));
+    
+    let downloadSuccess = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await axios({
+          method: 'GET',
+          url: downloadUrl,
+          responseType: 'stream',
+          timeout: 30000
+        });
+        await streamPipeline(response.data, fs.createWriteStream(localFilePath));
+        downloadSuccess = true;
+        break;
+      } catch (downloadErr) {
+        console.warn(`[sb] Download attempt ${attempt + 1} failed:`, downloadErr.message);
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+    
+    if (!downloadSuccess) {
+      throw new Error('Download failed after 3 attempts');
+    }
+    
     console.log(`[sb] Download complete.`);
+
+    // Verify file exists and has content
+    const stats = fs.statSync(localFilePath);
+    if (stats.size === 0) {
+      throw new Error('Downloaded file is empty');
+    }
 
     // 3. Play Local File
     const resource = createAudioResource(localFilePath, { 
@@ -453,30 +477,78 @@ async function sbPlayNext(guild, textChannel = null) {
     }
 
     if (textChannel) {
-        textChannel.send(`⚠️ **${next.name}** failed to load. Skipping...`).catch(()=>{});
+        textChannel.send(`⚠️ **${next.name}** failed to load. ${retryCount < 1 ? 'Retrying...' : 'Skipping...'}`).catch(()=>{});
     }
     q.now = null;
-    // Try next one
-    setTimeout(()=> sbPlayNext(guild, textChannel).catch(()=>{}), 1000);
+    
+    // Retry once, then skip
+    if (retryCount < 1) {
+      q.list.unshift(next); // Put back at front
+      setTimeout(() => sbPlayNext(guild, textChannel, retryCount + 1).catch(() => {}), 2000);
+    } else {
+      // Try next one
+      setTimeout(() => sbPlayNext(guild, textChannel, 0).catch(() => {}), 1000);
+    }
   }
 }
 
-// ---------- connect to VC ----------
+// ---------- connect to VC with improved error handling ----------
 async function sbConnectToMember(member) {
   if (!member.voice.channel) return { error: "not_in_vc" };
   const vc = member.voice.channel;
   const guild = member.guild;
 
   try {
+    // Check if already connected
+    const existingConn = getVoiceConnection(guild.id);
+    if (existingConn) {
+      // Verify connection is healthy
+      if (existingConn.state.status === VoiceConnectionStatus.Ready) {
+        const q = getSbQueue(guild.id);
+        q.vcId = vc.id;
+        if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
+        existingConn.subscribe(q.player);
+        return { connection: existingConn, channel: vc };
+      }
+      // Connection exists but not ready - destroy and reconnect
+      existingConn.destroy();
+    }
+
     const conn = joinVoiceChannel({
       channelId: vc.id,
       guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: false
+      selfDeaf: false,
+      selfMute: false
+    });
+
+    // Enhanced connection monitoring
+    conn.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        await Promise.race([
+          entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+        // Connection recovered
+      } catch (error) {
+        // Connection failed to recover
+        console.error('[Voice] Connection failed to recover, destroying...');
+        conn.destroy();
+        const q = getSbQueue(guild.id);
+        q.vcId = null;
+        q.list = [];
+        q.now = null;
+      }
+    });
+
+    conn.on(VoiceConnectionStatus.Destroyed, () => {
+      console.log(`[Voice] Connection destroyed for guild ${guild.id}`);
+      const q = getSbQueue(guild.id);
+      q.vcId = null;
     });
 
     try {
-      await entersState(conn, VoiceConnectionStatus.Ready, 15_000);
+      await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
     } catch (err) {
       console.error("[sb connect] Connection never became ready", err);
       conn.destroy();
@@ -488,10 +560,12 @@ async function sbConnectToMember(member) {
     
     if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
     conn.subscribe(q.player);
+    
+    console.log(`[Voice] Successfully connected to ${vc.name} in ${guild.name}`);
     return { connection: conn, channel: vc };
   } catch (err) {
     console.error("[sb connect]", err);
-    return { error: "connect_failed" };
+    return { error: "connect_failed", details: err.message };
   }
 }
 
@@ -543,7 +617,7 @@ async function buildSoundPanelEmbed(guild) {
   return { embed, buttons: [row1] };
 }
 
-// ---------- Discord client ----------
+// ---------- Discord client with improved configuration ----------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -552,7 +626,17 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildPresences
   ],
-  partials: [Partials.User, Partials.GuildMember]
+  partials: [Partials.User, Partials.GuildMember],
+  // Critical: Prevent disconnections
+  ws: {
+    properties: {
+      browser: 'Discord iOS'
+    }
+  },
+  // Improved shard handling
+  shards: 'auto',
+  // Increase timeout for slow connections
+  restRequestTimeout: 30000
 });
 
 // ---------- Embeds colors ----------
@@ -663,23 +747,79 @@ const commands = [
       .addStringOption(o => o.setName("name").setDescription("sᴇʟᴇᴄᴛ").setAutocomplete(true).setRequired(true)))
     .addSubcommand(s => s.setName("list").setDescription("📜 ʟɪsᴛ"))
     .addSubcommand(s => s.setName("panel").setDescription("🎛 ᴏᴘᴇɴ ᴘᴀɴᴇʟ"))
-    // NEW COMMANDS ADDED BELOW
     .addSubcommand(s => s.setName("volume").setDescription("🔊 sᴇᴛ ᴠᴏʟᴜᴍᴇ")
       .addIntegerOption(o => o.setName("level").setDescription("0 - 100").setRequired(true).setMinValue(0).setMaxValue(100)))
-    .addSubcommand(s => s.setName("top").setDescription("🏆 ᴍᴏsᴛ ᴘʟᴀʏᴇᴅ sᴏᴜɴᴅs"))
+    .addSubcommand(s => s.setName("top").setDescription("🏆 ᴍᴏsᴛ ᴘʟᴀʏᴇᴅ sᴏᴜɴᴅs")),
+  new SlashCommandBuilder()
+    .setName("stats")
+    .setDescription("📊 sʜᴏᴡ sᴇʀᴠᴇʀ ᴀᴄᴛɪᴠɪᴛʏ sᴛᴀᴛɪsᴛɪᴄs")
+    .addStringOption(opt => opt
+      .setName("period")
+      .setDescription("ᴛɪᴍᴇ ᴘᴇʀɪᴏᴅ")
+      .setRequired(false)
+      .addChoices(
+        { name: "📅 Today", value: "today" },
+        { name: "📆 Last 7 days", value: "7days" },
+        { name: "🗓️ Last 30 days", value: "30days" },
+        { name: "📈 All time", value: "all" }
+      )),
+  new SlashCommandBuilder()
+    .setName("ping")
+    .setDescription("🏓 ᴄʜᴇᴄᴋ ʙᴏᴛ ʟᴀᴛᴇɴᴄʏ ᴀɴᴅ sᴛᴀᴛᴜs"),
+  new SlashCommandBuilder()
+    .setName("cleanup")
+    .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs")
 ].map(c => c.toJSON());
+
+// ---------- Connection Health Monitoring ----------
+let lastHeartbeat = Date.now();
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+// Monitor Gateway Health
+setInterval(() => {
+  const timeSinceLastBeat = Date.now() - lastHeartbeat;
+  if (timeSinceLastBeat > 60000) { // 60 seconds without heartbeat
+    console.warn(`⚠️ No heartbeat for ${Math.floor(timeSinceLastBeat/1000)}s - Connection may be dead`);
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      console.log(`🔄 Attempting reconnection (${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+      reconnectAttempts++;
+      client.destroy();
+      setTimeout(() => {
+        client.login(process.env.TOKEN).catch(e => {
+          console.error('❌ Reconnection failed:', e);
+        });
+      }, 5000);
+    }
+  }
+}, 30000); // Check every 30 seconds
 
 // ---------- Ready & register commands ----------
 client.once("clientReady", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
-  try { client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" }); } catch(e) {}
+  lastHeartbeat = Date.now();
+  reconnectAttempts = 0; // Reset on successful connection
+  
+  try { 
+    client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" }); 
+  } catch(e) { 
+    console.error('[Activity] Failed to set activity:', e); 
+  }
+  
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
   try {
+    console.log('📝 Registering slash commands...');
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("✅ Slash commands registered.");
+    console.log("✅ Slash commands registered successfully.");
   } catch (err) {
     console.error("❌ Command registration error:", err);
   }
+  
+  // Pre-warm caches
+  console.log('🔥 Pre-warming caches...');
+  const guildIds = client.guilds.cache.map(g => g.id);
+  await Promise.all(guildIds.map(id => getGuildSettings(id).catch(() => null)));
+  console.log(`✅ Cached settings for ${guildIds.length} guilds`);
 });
 
 // ---------- Interaction handler ----------
@@ -835,6 +975,251 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const filePath = await generateActivityFile(guild, logs);
           await interaction.followUp({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }], ephemeral: false });
           return;
+        }
+
+        // ------------------ NEW: STATS COMMAND ------------------
+        case "stats": {
+          await interaction.deferReply({ flags: 64 });
+          const period = interaction.options.getString("period") || "7days";
+          
+          // Calculate time range
+          const now = Date.now();
+          let startTime;
+          let periodLabel;
+          
+          switch (period) {
+            case "today":
+              const todayStart = new Date();
+              todayStart.setHours(0, 0, 0, 0);
+              startTime = todayStart.getTime();
+              periodLabel = "Today";
+              break;
+            case "7days":
+              startTime = now - (7 * 24 * 60 * 60 * 1000);
+              periodLabel = "Last 7 Days";
+              break;
+            case "30days":
+              startTime = now - (30 * 24 * 60 * 60 * 1000);
+              periodLabel = "Last 30 Days";
+              break;
+            case "all":
+              startTime = 0;
+              periodLabel = "All Time";
+              break;
+            default:
+              startTime = now - (7 * 24 * 60 * 60 * 1000);
+              periodLabel = "Last 7 Days";
+          }
+          
+          // Fetch logs
+          const query = { guildId: guild.id };
+          if (startTime > 0) {
+            query.time = { $gte: new Date(startTime) };
+          }
+          
+          const logs = await GuildLog.find(query).lean();
+          
+          if (logs.length === 0) {
+            return interaction.editReply({ 
+              embeds: [makeEmbed({ 
+                title: "📊 No Statistics Available", 
+                description: "No activity recorded for this period.", 
+                color: EmbedColors.INFO, 
+                guild 
+              })] 
+            });
+          }
+          
+          // Calculate statistics
+          const joinCount = logs.filter(l => l.type === "join").length;
+          const leaveCount = logs.filter(l => l.type === "leave").length;
+          const onlineCount = logs.filter(l => l.type === "online").length;
+          
+          // Most active users
+          const userActivity = {};
+          logs.forEach(log => {
+            if (!userActivity[log.user]) {
+              userActivity[log.user] = { joins: 0, leaves: 0, online: 0, total: 0 };
+            }
+            if (log.type === "join") userActivity[log.user].joins++;
+            if (log.type === "leave") userActivity[log.user].leaves++;
+            if (log.type === "online") userActivity[log.user].online++;
+            userActivity[log.user].total++;
+          });
+          
+          const topUsers = Object.entries(userActivity)
+            .sort((a, b) => b[1].total - a[1].total)
+            .slice(0, 5)
+            .map(([user, stats], idx) => {
+              const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `${idx + 1}.`;
+              return `${medal} **${user}** - ${stats.total} events (${stats.joins} joins, ${stats.leaves} leaves)`;
+            });
+          
+          // Most active channels
+          const channelActivity = {};
+          logs.forEach(log => {
+            if (log.channel && log.channel !== "-") {
+              channelActivity[log.channel] = (channelActivity[log.channel] || 0) + 1;
+            }
+          });
+          
+          const topChannels = Object.entries(channelActivity)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([channel, count], idx) => `${idx + 1}. **${channel}** - ${count} events`);
+          
+          // Peak activity hours
+          const hourlyActivity = {};
+          logs.forEach(log => {
+            const hour = new Date(log.time).getHours();
+            hourlyActivity[hour] = (hourlyActivity[hour] || 0) + 1;
+          });
+          
+          const peakHour = Object.entries(hourlyActivity)
+            .sort((a, b) => b[1] - a[1])[0];
+          
+          const embed = new EmbedBuilder()
+            .setColor(EmbedColors.INFO)
+            .setTitle(`📊 Server Activity Statistics`)
+            .setDescription(`**${periodLabel}** - ${guild.name}`)
+            .addFields(
+              {
+                name: "📈 Overview",
+                value: `Total Events: **${logs.length}**\n` +
+                       `🟢 Joins: **${joinCount}**\n` +
+                       `🔴 Leaves: **${leaveCount}**\n` +
+                       `💠 Online: **${onlineCount}**`,
+                inline: true
+              },
+              {
+                name: "⏰ Peak Activity",
+                value: peakHour ? `**${peakHour[0]}:00** (${peakHour[1]} events)` : "N/A",
+                inline: true
+              },
+              {
+                name: "👥 Most Active Users",
+                value: topUsers.length > 0 ? topUsers.join("\n") : "No data",
+                inline: false
+              }
+            );
+          
+          if (topChannels.length > 0) {
+            embed.addFields({
+              name: "🎧 Most Active Voice Channels",
+              value: topChannels.join("\n"),
+              inline: false
+            });
+          }
+          
+          embed.setFooter({ text: `Analyzed ${logs.length} events` })
+               .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+        // ------------------ NEW: PING COMMAND ------------------
+        case "ping": {
+          const startTime = Date.now();
+          await interaction.deferReply({ flags: 64 });
+          const apiLatency = Date.now() - startTime;
+          const wsLatency = client.ws.ping;
+          
+          let statusEmoji = "🟢";
+          let statusText = "Excellent";
+          if (wsLatency > 200 || apiLatency > 500) {
+            statusEmoji = "🟡";
+            statusText = "Good";
+          }
+          if (wsLatency > 500 || apiLatency > 1000) {
+            statusEmoji = "🟠";
+            statusText = "Fair";
+          }
+          if (wsLatency > 1000 || apiLatency > 2000) {
+            statusEmoji = "🔴";
+            statusText = "Poor";
+          }
+          
+          const uptime = process.uptime();
+          const hours = Math.floor(uptime / 3600);
+          const minutes = Math.floor((uptime % 3600) / 60);
+          
+          const embed = new EmbedBuilder()
+            .setColor(EmbedColors.INFO)
+            .setTitle("🏓 Pong!")
+            .setDescription(
+              `**Connection Status:** ${statusEmoji} ${statusText}\n\n` +
+              `**Latency Info:**\n` +
+              `> 🌐 API Latency: \`${apiLatency}ms\`\n` +
+              `> 📡 WebSocket Ping: \`${wsLatency}ms\`\n` +
+              `> ⏱️ Uptime: \`${hours}h ${minutes}m\`\n` +
+              `> 📊 Guilds: \`${client.guilds.cache.size}\`\n` +
+              `> 👥 Users: \`${client.users.cache.size}\``
+            )
+            .setFooter({ text: "Bot Health Monitor" })
+            .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+        // ------------------ NEW: CLEANUP COMMAND ------------------
+        case "cleanup": {
+          if (!await checkAdmin(interaction)) return;
+          
+          await interaction.deferReply({ flags: 64 });
+          
+          try {
+            // Count logs older than 30 days
+            const thirtyDaysAgo = new Date(Date.now() - (30 * 24 * 60 * 60 * 1000));
+            const oldLogsCount = await GuildLog.countDocuments({ 
+              guildId: guild.id, 
+              time: { $lt: thirtyDaysAgo } 
+            });
+            
+            // Delete old logs
+            if (oldLogsCount > 0) {
+              await GuildLog.deleteMany({ 
+                guildId: guild.id, 
+                time: { $lt: thirtyDaysAgo } 
+              });
+            }
+            
+            // Clean temp directory
+            const tempFiles = fs.readdirSync(TEMP_DIR);
+            let cleanedFiles = 0;
+            for (const file of tempFiles) {
+              const filePath = path.join(TEMP_DIR, file);
+              const stats = fs.statSync(filePath);
+              // Delete files older than 1 hour
+              if (Date.now() - stats.mtimeMs > 3600000) {
+                fs.unlinkSync(filePath);
+                cleanedFiles++;
+              }
+            }
+            
+            const embed = new EmbedBuilder()
+              .setColor(EmbedColors.SUCCESS)
+              .setTitle("🧹 Cleanup Complete")
+              .setDescription(
+                `Successfully cleaned up old data:\n\n` +
+                `📜 Removed **${oldLogsCount}** old log entries (>30 days)\n` +
+                `📁 Cleaned **${cleanedFiles}** temporary files\n` +
+                `💾 Database optimized`
+              )
+              .setFooter({ text: "Cleanup performed successfully" })
+              .setTimestamp();
+            
+            return interaction.editReply({ embeds: [embed] });
+          } catch (error) {
+            console.error("[Cleanup Error]", error);
+            return interaction.editReply({ 
+              embeds: [makeEmbed({ 
+                title: "❌ Cleanup Failed", 
+                description: "An error occurred during cleanup. Check logs for details.", 
+                color: EmbedColors.ERROR, 
+                guild 
+              })] 
+            });
+          }
         }
 
         // ------------------ SOUND-BOARD: top-level 'sound' command ------------------
@@ -1263,12 +1648,106 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => { console.error('[uncaughtException]', err); shutdown('uncaughtException'); });
 process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason); });
 
-(async () => {
+// ---------- Gateway Connection Event Handlers ----------
+client.on('warn', (info) => {
+  console.warn('[Discord Warning]', info);
+});
+
+client.on('error', (error) => {
+  console.error('[Discord Error]', error);
+});
+
+client.on('shardError', (error) => {
+  console.error('[Shard Error]', error);
+});
+
+client.on('shardReconnecting', (id) => {
+  console.log(`🔄 Shard ${id} reconnecting...`);
+  lastHeartbeat = Date.now();
+});
+
+client.on('shardResume', (id, replayedEvents) => {
+  console.log(`✅ Shard ${id} resumed (${replayedEvents} events replayed)`);
+  lastHeartbeat = Date.now();
+  reconnectAttempts = 0;
+});
+
+client.on('shardDisconnect', (event, id) => {
+  console.warn(`⚠️ Shard ${id} disconnected (${event.code}: ${event.reason})`);
+});
+
+// Heartbeat monitoring
+client.ws.on('HEARTBEAT', () => {
+  lastHeartbeat = Date.now();
+});
+
+// ---------- MongoDB Connection with Retry ----------
+let mongoRetries = 0;
+const MAX_MONGO_RETRIES = 5;
+
+async function connectMongoDB() {
   try {
     if (!process.env.MONGO_URI) throw new Error("MONGO_URI not provided in .env");
-    await mongoose.connect(process.env.MONGO_URI, { dbName: "Discord-Alert-Bot" });
-    console.log("✅ MongoDB Connected to DB");
-  } catch (e) { console.error("❌ MongoDB connection error:", e?.message ?? e); process.exit(1); }
-  if (!process.env.TOKEN) { console.error("❌ TOKEN not set in .env"); process.exit(1); }
-  client.login(process.env.TOKEN).catch(err => console.error("❌ Login failed:", err));
+    
+    await mongoose.connect(process.env.MONGO_URI, { 
+      dbName: "Discord-Alert-Bot",
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      minPoolSize: 2,
+      retryWrites: true,
+      retryReads: true
+    });
+    
+    console.log("✅ MongoDB Connected successfully");
+    mongoRetries = 0;
+    return true;
+  } catch (e) {
+    console.error("❌ MongoDB connection error:", e?.message ?? e);
+    
+    if (mongoRetries < MAX_MONGO_RETRIES) {
+      mongoRetries++;
+      console.log(`🔄 Retrying MongoDB connection (${mongoRetries}/${MAX_MONGO_RETRIES}) in 5s...`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      return connectMongoDB();
+    }
+    
+    console.error('❌ MongoDB connection failed after max retries');
+    process.exit(1);
+  }
+}
+
+// MongoDB error handlers
+mongoose.connection.on('error', (err) => {
+  console.error('[MongoDB Error]', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('⚠️ MongoDB disconnected. Attempting to reconnect...');
+  connectMongoDB();
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('✅ MongoDB reconnected');
+});
+
+// ---------- Start Bot ----------
+(async () => {
+  // Connect to MongoDB first
+  await connectMongoDB();
+  
+  // Validate Discord token
+  if (!process.env.TOKEN) { 
+    console.error("❌ TOKEN not set in .env"); 
+    process.exit(1); 
+  }
+  
+  // Login to Discord
+  try {
+    console.log('🔐 Logging in to Discord...');
+    await client.login(process.env.TOKEN);
+  } catch (err) {
+    console.error("❌ Discord login failed:", err);
+    process.exit(1);
+  }
 })();
