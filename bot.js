@@ -120,13 +120,14 @@ const guildSettingsSchema = new mongoose.Schema({
 const GuildSettings = mongoose.model("GuildSettings", guildSettingsSchema);
 
 const logSchema = new mongoose.Schema({
-  guildId: { type: String, required: true, index: true },
+  guildId: { type: String, required: true },
   guildName: String,
   user: { type: String, required: true },
   channel: String,
   type: { type: String, required: true, enum: ["join", "leave", "online"] },
-  time: { type: Date, default: Date.now, index: true }
+  time: { type: Date, default: Date.now }
 });
+// Consolidated indexes (removed duplicate field-level indexes to fix warning)
 logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
 logSchema.index({ guildId: 1, time: -1 });
 logSchema.index({ guildId: 1, user: 1, time: -1 });
@@ -980,7 +981,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ------------------ NEW: STATS COMMAND ------------------
         case "stats": {
           await interaction.deferReply({ flags: 64 });
-          const period = interaction.options.getString("period") || "7days";
+          const period = interaction.options.getString("period") || "today";
           
           // Calculate time range
           const now = Date.now();
@@ -1151,9 +1152,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `**Latency Info:**\n` +
               `> 🌐 API Latency: \`${apiLatency}ms\`\n` +
               `> 📡 WebSocket Ping: \`${wsLatency}ms\`\n` +
-              `> ⏱️ Uptime: \`${hours}h ${minutes}m\`\n` +
-              `> 📊 Guilds: \`${client.guilds.cache.size}\`\n` +
-              `> 👥 Users: \`${client.users.cache.size}\``
+              `> ⏱️ Uptime: \`${hours}h ${minutes}m\``
             )
             .setFooter({ text: "Bot Health Monitor" })
             .setTimestamp();
@@ -1508,7 +1507,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
 const activeVCThreads = new Map();
 const threadDeletionTimeouts = new Map();
 const vcLocks = new Map();
-const THREAD_INACTIVITY_MS = 5 * 60 * 1000; 
+const threadLastActivity = new Map(); // Track last activity per thread
+const THREAD_INACTIVITY_MS = 5 * 60 * 1000;
+const THREAD_CHECK_INTERVAL = 30 * 1000; // Check every 30 seconds
+
+// Thread cleanup monitor (prevents 50-60min delays)
+setInterval(() => {
+  const now = Date.now();
+  for (const [vcId, lastActivity] of threadLastActivity.entries()) {
+    if (now - lastActivity >= THREAD_INACTIVITY_MS) {
+      const thread = activeVCThreads.get(vcId);
+      if (thread) {
+        thread.delete().catch(() => {});
+        activeVCThreads.delete(vcId);
+        threadLastActivity.delete(vcId);
+        if (threadDeletionTimeouts.has(vcId)) {
+          clearTimeout(threadDeletionTimeouts.get(vcId));
+          threadDeletionTimeouts.delete(vcId);
+        }
+        console.log(`[Thread Cleanup] 🗑️ Auto-deleted inactive thread for VC ${vcId}`);
+      }
+    }
+  }
+}, THREAD_CHECK_INTERVAL); 
 
 async function withVCLock(vcId, fn) {
   const prev = vcLocks.get(vcId) || Promise.resolve();
@@ -1572,12 +1593,17 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
           try {
             thread = await logChannel.threads.create({ name: `🔊│${shortName} • VC Alerts`, type: ChannelType.PrivateThread, autoArchiveDuration: 1440, reason: `Private VC alert thread for ${vc.name}` });
             activeVCThreads.set(vc.id, thread);
+            threadLastActivity.set(vc.id, Date.now());
             console.log(`[VC Thread] 🧵 Created new thread for ${vc.name}`);
           } catch (err) { console.warn(`[VC Thread] Failed to create thread for ${vc.name}:`, err.message); return; }
         }
+        
+        // Update last activity timestamp
+        threadLastActivity.set(vc.id, Date.now());
+        
         if (threadDeletionTimeouts.has(vc.id)) clearTimeout(threadDeletionTimeouts.get(vc.id));
         const timeout = setTimeout(async () => {
-          try { await thread.delete().catch(() => {}); console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`); } finally { activeVCThreads.delete(vc.id); threadDeletionTimeouts.delete(vc.id); }
+          try { await thread.delete().catch(() => {}); console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`); } finally { activeVCThreads.delete(vc.id); threadDeletionTimeouts.delete(vc.id); threadLastActivity.delete(vc.id); }
         }, THREAD_INACTIVITY_MS);
         timeout.unref();
         threadDeletionTimeouts.set(vc.id, timeout);
