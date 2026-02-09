@@ -103,32 +103,6 @@ const app = express();
 app.get("/", (_, res) => res.status(200).json({ status: "✅ ʙᴏᴛ ɪs ᴀʟɪᴠᴇ ᴀɴᴅ ᴠɪʙɪɴɢ" }));
 app.listen(PORT, () => console.log(`🌐 ᴡᴇʙ sᴇʀᴠᴇʀ ʀᴜɴɴɪɴɢ ᴏɴ ᴘᴏʀt ${PORT}`));
 
-// ---------- Automatic Cleanup System ----------
-async function performAutomaticCleanup() {
-  try {
-    const thirtyDaysAgo = new Date(Date.now() - (30 * 24 * 60 * 60 * 1000));
-    const deletedLogs = await GuildLog.deleteMany({ time: { $lt: thirtyDaysAgo } }).catch(() => ({ deletedCount: 0 }));
-    if (deletedLogs.deletedCount > 0) console.log(`🧹 Auto-cleanup: Removed ${deletedLogs.deletedCount} old logs`);
-    
-    const tempFiles = fs.readdirSync(TEMP_DIR);
-    let cleanedFiles = 0;
-    for (const file of tempFiles) {
-      try {
-        const filePath = path.join(TEMP_DIR, file);
-        const stats = fs.statSync(filePath);
-        if (Date.now() - stats.mtimeMs > 3600000) {
-          fs.unlinkSync(filePath);
-          cleanedFiles++;
-        }
-      } catch (e) {}
-    }
-    if (cleanedFiles > 0) console.log(`🧹 Auto-cleanup: Removed ${cleanedFiles} temp files`);
-  } catch (error) {
-    console.error('[Auto-cleanup]', error.message);
-  }
-}
-setInterval(performAutomaticCleanup, 6 * 60 * 60 * 1000);
-
 // ---------- Mongoose Schema & Models ----------
 const guildSettingsSchema = new mongoose.Schema({
   guildId: { type: String, required: true, unique: true },
@@ -151,7 +125,7 @@ const logSchema = new mongoose.Schema({
   user: { type: String, required: true },
   channel: String,
   type: { type: String, required: true, enum: ["join", "leave", "online"] },
-  time: { type: Date, default: Date.now }
+  time: { type: Date, default: Date.now, index: true }
 });
 logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
 logSchema.index({ guildId: 1, time: -1 });
@@ -797,40 +771,28 @@ const commands = [
     .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs")
 ].map(c => c.toJSON());
 
-// ---------- Connection Health Monitoring (Optimized - Less Aggressive) ----------
+// ---------- Connection Health Monitoring ----------
 let lastHeartbeat = Date.now();
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
-let reconnectionInProgress = false;
 
-// Monitor Gateway Health - Check every 60s, reconnect only after 3min silence
+// Monitor Gateway Health
 setInterval(() => {
   const timeSinceLastBeat = Date.now() - lastHeartbeat;
-  
-  // Only warn/reconnect if no heartbeat for 3 minutes
-  if (timeSinceLastBeat > 180000 && !reconnectionInProgress) {
-    console.warn(`⚠️ Gateway silent for ${Math.floor(timeSinceLastBeat/1000)}s - Initiating reconnection`);
-    
+  if (timeSinceLastBeat > 60000) { // 60 seconds without heartbeat
+    console.warn(`⚠️ No heartbeat for ${Math.floor(timeSinceLastBeat/1000)}s - Connection may be dead`);
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      reconnectionInProgress = true;
+      console.log(`🔄 Attempting reconnection (${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
       reconnectAttempts++;
-      console.log(`🔄 Reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
-      
       client.destroy();
       setTimeout(() => {
-        client.login(process.env.TOKEN)
-          .then(() => {
-            console.log('✅ Reconnected successfully');
-            reconnectionInProgress = false;
-          })
-          .catch(e => {
-            console.error('❌ Reconnection failed:', e.message);
-            reconnectionInProgress = false;
-          });
+        client.login(process.env.TOKEN).catch(e => {
+          console.error('❌ Reconnection failed:', e);
+        });
       }, 5000);
     }
   }
-}, 60000); // Check every 60s
+}, 30000); // Check every 30 seconds
 
 // ---------- Ready & register commands ----------
 client.once("clientReady", async () => {
