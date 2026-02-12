@@ -725,6 +725,33 @@ const commands = [
     .setName("resetignorerole")
     .setDescription("♻️ ʀᴇsᴇᴛ ɪɢɴᴏʀᴇ ʀᴏʟᴇ"),
   new SlashCommandBuilder()
+    .setName("ignorerole")
+    .setDescription("🙈 ᴍᴀɴᴀɢᴇ ɪɢɴᴏʀᴇᴅ ʀᴏʟᴇ sᴇᴛᴛɪɴɢs")
+    .addStringOption(opt => opt
+      .setName("action")
+      .setDescription("Select an action")
+      .setRequired(true)
+      .addChoices(
+        { name: "View", value: "view" },
+        { name: "Set", value: "set" },
+        { name: "Reset", value: "reset" },
+        { name: "Toggle On/Off", value: "toggle" }
+      ))
+    .addRoleOption(opt => opt
+      .setName("role")
+      .setDescription("Role to ignore (required for 'set' action)")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("userinfo")
+    .setDescription("👤 ɢᴇᴛ ᴅᴇᴛᴀɪʟᴇᴅ ᴜsᴇʀ ɪɴғᴏʀᴍᴀᴛɪᴏɴ")
+    .addUserOption(opt => opt
+      .setName("user")
+      .setDescription("Select a user (leave empty for your own info)")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("owner")
+    .setDescription("👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ (ᴅᴍ ᴏɴʟʏ)"),
+  new SlashCommandBuilder()
     .setName("logs")
     .setDescription("📜 ᴠɪᴇᴡ sᴇʀᴠᴇʀ ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢs")
     .addStringOption(opt => opt
@@ -775,15 +802,25 @@ const commands = [
 // ---------- Connection Health Monitoring ----------
 let lastHeartbeat = Date.now();
 let reconnectAttempts = 0;
+let lastHeartbeatLog = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
+const HEARTBEAT_LOG_COOLDOWN = 5 * 60 * 1000; // 5 minutes
 
 // Monitor Gateway Health
 setInterval(() => {
   const timeSinceLastBeat = Date.now() - lastHeartbeat;
   if (timeSinceLastBeat > 60000) { // 60 seconds without heartbeat
-    console.warn(`⚠️ No heartbeat for ${Math.floor(timeSinceLastBeat/1000)}s - Connection may be dead`);
+    // Only log once per 5 minutes to reduce spam
+    const now = Date.now();
+    if (now - lastHeartbeatLog > HEARTBEAT_LOG_COOLDOWN) {
+      console.warn(`⚠️ No heartbeat for ${Math.floor(timeSinceLastBeat/1000)}s - Connection may be dead`);
+      lastHeartbeatLog = now;
+    }
+    
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      console.log(`🔄 Attempting reconnection (${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+      if (now - lastHeartbeatLog < 1000) { // Only log reconnection if we just logged the warning
+        console.log(`🔄 Attempting reconnection (${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+      }
       reconnectAttempts++;
       client.destroy();
       setTimeout(() => {
@@ -911,6 +948,377 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await updateGuildSettings(settings);
           return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("👀 ignored role cleared"), description: toSmallCaps("everyone’s back on the radar 🌍\nall members will now appear in vc alerts again 💫"), color: EmbedColors.RESET, guild })], flags: 64 });
         }
+
+
+        // ------------------ NEW: UNIFIED IGNOREROLE COMMAND ------------------
+        case "ignorerole": {
+          const action = interaction.options.getString("action");
+          const role = interaction.options.getRole("role");
+          
+          if (action === "view") {
+            const statusEmoji = settings.ignoreRoleEnabled ? "🟢" : "🔴";
+            const statusText = settings.ignoreRoleEnabled ? "Activated" : "Deactivated";
+            const roleText = settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set";
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("🙈 ignore role settings"), 
+                description: toSmallCaps(
+                  `**Status:** ${statusEmoji} ${statusText}\n` +
+                  `**Ignored Role:** ${roleText}\n\n` +
+                  (settings.ignoreRoleEnabled && settings.ignoredRoleId 
+                    ? "Members with this role will be skipped in VC alerts 🚫" 
+                    : "No role is currently being ignored ✨")
+                ), 
+                color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.INFO, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          if (action === "set") {
+            if (!role) {
+              return interaction.reply({ 
+                embeds: [makeEmbed({ 
+                  title: toSmallCaps("⚠️ role required"), 
+                  description: toSmallCaps("Please provide a role to ignore.\nUse: `/ignorerole action:set role:@role`"), 
+                  color: EmbedColors.WARNING, 
+                  guild 
+                })], 
+                flags: 64 
+              });
+            }
+            
+            settings.ignoredRoleId = role.id;
+            settings.ignoreRoleEnabled = true;
+            await updateGuildSettings(settings);
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("✅ ignore role activated"), 
+                description: toSmallCaps(
+                  `Members with ${role} will now be skipped in VC alerts 🚫\n\n` +
+                  `Perfect for staff, bots, or background lurkers 😌`
+                ), 
+                color: EmbedColors.SUCCESS, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          if (action === "reset") {
+            if (!settings.ignoredRoleId) {
+              return interaction.reply({ 
+                embeds: [makeEmbed({ 
+                  title: toSmallCaps("ℹ️ no role set"), 
+                  description: toSmallCaps("There's no ignored role configured yet."), 
+                  color: EmbedColors.INFO, 
+                  guild 
+                })], 
+                flags: 64 
+              });
+            }
+            
+            settings.ignoredRoleId = null;
+            settings.ignoreRoleEnabled = false;
+            await updateGuildSettings(settings);
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("♻️ ignore role reset"), 
+                description: toSmallCaps("Everyone's back on the radar 🌍\nAll members will now appear in VC alerts again 💫"), 
+                color: EmbedColors.RESET, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          if (action === "toggle") {
+            if (!settings.ignoredRoleId) {
+              return interaction.reply({ 
+                embeds: [makeEmbed({ 
+                  title: toSmallCaps("⚠️ no role configured"), 
+                  description: toSmallCaps("Please set an ignored role first using:\n`/ignorerole action:set role:@role`"), 
+                  color: EmbedColors.WARNING, 
+                  guild 
+                })], 
+                flags: 64 
+              });
+            }
+            
+            settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
+            await updateGuildSettings(settings);
+            
+            const newStatus = settings.ignoreRoleEnabled ? "activated" : "deactivated";
+            const emoji = settings.ignoreRoleEnabled ? "✅" : "🔴";
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps(`${emoji} ignore role ${newStatus}`), 
+                description: toSmallCaps(
+                  `The ignore role feature has been **${newStatus}**\n\n` +
+                  `Role: <@&${settings.ignoredRoleId}>`
+                ), 
+                color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          break;
+        }
+
+        // ------------------ NEW: USERINFO COMMAND ------------------
+        case "userinfo": {
+          await interaction.deferReply({ flags: 64 });
+          
+          const targetUser = interaction.options.getUser("user") || interaction.user;
+          const member = await guild.members.fetch(targetUser.id).catch(() => null);
+          
+          if (!member) {
+            return interaction.editReply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("❌ user not found"), 
+                description: toSmallCaps("This user is not in the server."), 
+                color: EmbedColors.ERROR, 
+                guild 
+              })] 
+            });
+          }
+          
+          // Account creation date (IST)
+          const createdDate = new Date(targetUser.createdTimestamp);
+          const createdIST = new Date(createdDate.getTime() + (5.5 * 60 * 60 * 1000));
+          const createdStr = createdIST.toLocaleDateString("en-IN", { 
+            day: "2-digit", 
+            month: "short", 
+            year: "numeric", 
+            timeZone: "Asia/Kolkata" 
+          });
+          const daysSinceCreation = Math.floor((Date.now() - targetUser.createdTimestamp) / (1000 * 60 * 60 * 24));
+          
+          // Server join date (IST)
+          const joinedDate = member.joinedAt;
+          const joinedIST = new Date(joinedDate.getTime() + (5.5 * 60 * 60 * 1000));
+          const joinedStr = joinedIST.toLocaleDateString("en-IN", { 
+            day: "2-digit", 
+            month: "short", 
+            year: "numeric", 
+            timeZone: "Asia/Kolkata" 
+          });
+          const daysSinceJoin = Math.floor((Date.now() - member.joinedTimestamp) / (1000 * 60 * 60 * 24));
+          
+          // Roles (exclude @everyone)
+          const roles = member.roles.cache
+            .filter(r => r.id !== guild.id)
+            .sort((a, b) => b.position - a.position)
+            .map(r => `<@&${r.id}>`)
+            .slice(0, 20);
+          const roleText = roles.length > 0 ? roles.join(", ") : "No roles";
+          const roleCount = member.roles.cache.size - 1;
+          
+          // Key permissions
+          const keyPerms = [];
+          if (member.permissions.has(PermissionFlagsBits.Administrator)) keyPerms.push("👑 Administrator");
+          if (member.permissions.has(PermissionFlagsBits.ManageGuild)) keyPerms.push("🛠️ Manage Server");
+          if (member.permissions.has(PermissionFlagsBits.ManageChannels)) keyPerms.push("📁 Manage Channels");
+          if (member.permissions.has(PermissionFlagsBits.ManageRoles)) keyPerms.push("🎭 Manage Roles");
+          if (member.permissions.has(PermissionFlagsBits.KickMembers)) keyPerms.push("🚪 Kick Members");
+          if (member.permissions.has(PermissionFlagsBits.BanMembers)) keyPerms.push("🔨 Ban Members");
+          const permsText = keyPerms.length > 0 ? keyPerms.join(", ") : "No special permissions";
+          
+          // Status and badges
+          const status = member.presence?.status || "offline";
+          const statusEmoji = status === "online" ? "🟢" : status === "idle" ? "🟡" : status === "dnd" ? "🔴" : "⚫";
+          const statusText = status.charAt(0).toUpperCase() + status.slice(1);
+          
+          const badges = [];
+          if (member.user.bot) badges.push("🤖 Bot");
+          if (member.premiumSince) badges.push("💎 Server Booster");
+          if (targetUser.id === guild.ownerId) badges.push("👑 Server Owner");
+          const badgesText = badges.length > 0 ? badges.join(", ") : "No badges";
+          
+          // Voice channel
+          const voiceChannel = member.voice.channel;
+          const voiceText = voiceChannel ? `🎧 ${voiceChannel.name}` : "Not in voice";
+          
+          const embed = new EmbedBuilder()
+            .setColor(member.displayHexColor || EmbedColors.INFO)
+            .setAuthor({ 
+              name: `${member.user.username}'s Profile`, 
+              iconURL: targetUser.displayAvatarURL({ dynamic: true, size: 256 }) 
+            })
+            .setThumbnail(targetUser.displayAvatarURL({ dynamic: true, size: 256 }))
+            .setDescription(
+              `**User:** ${targetUser}\n` +
+              `**Display Name:** ${member.displayName}\n` +
+              `**Status:** ${statusEmoji} ${statusText}\n` +
+              `**Voice:** ${voiceText}`
+            )
+            .addFields(
+              {
+                name: "📅 Account Created",
+                value: `${createdStr}\n(${daysSinceCreation} days ago)`,
+                inline: true
+              },
+              {
+                name: "📥 Joined Server",
+                value: `${joinedStr}\n(${daysSinceJoin} days ago)`,
+                inline: true
+              },
+              {
+                name: "🏅 Badges",
+                value: badgesText,
+                inline: false
+              },
+              {
+                name: `🎭 Roles (${roleCount})`,
+                value: roleText,
+                inline: false
+              },
+              {
+                name: "🔑 Key Permissions",
+                value: permsText,
+                inline: false
+              }
+            )
+            .setFooter({ text: `ID: ${targetUser.id} • All times in IST` })
+            .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+        // ------------------ NEW: OWNER COMMAND ------------------
+        case "owner": {
+          // Check if DM or regular guild
+          if (interaction.guild) {
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("🔒 dm only command"), 
+                description: toSmallCaps("This command can only be used in DMs with the bot.\nPlease send me a direct message and try again."), 
+                color: EmbedColors.WARNING, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          // Check if user is the bot owner
+          const OWNER_ID = process.env.OWNER_ID;
+          if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
+            return interaction.reply({ 
+              embeds: [new EmbedBuilder()
+                .setColor(EmbedColors.ERROR)
+                .setTitle(toSmallCaps("🚫 unauthorized"))
+                .setDescription(toSmallCaps("Only the bot owner can use this command."))
+                .setTimestamp()
+              ], 
+              flags: 64 
+            });
+          }
+          
+          await interaction.deferReply({ flags: 64 });
+          
+          // Gather bot statistics
+          const totalGuilds = client.guilds.cache.size;
+          const totalMembers = client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0);
+          
+          // Recent activity (last 24 hours)
+          const oneDayAgo = new Date(Date.now() - (24 * 60 * 60 * 1000));
+          const recentLogsCount = await GuildLog.countDocuments({ time: { $gte: oneDayAgo } }).catch(() => 0);
+          
+          // Memory usage
+          const memUsage = process.memoryUsage();
+          const memUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(2);
+          const memTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(2);
+          
+          // Uptime
+          const uptimeSecs = Math.floor(process.uptime());
+          const days = Math.floor(uptimeSecs / 86400);
+          const hours = Math.floor((uptimeSecs % 86400) / 3600);
+          const minutes = Math.floor((uptimeSecs % 3600) / 60);
+          const uptimeText = `${days}d ${hours}h ${minutes}m`;
+          
+          // WebSocket ping
+          const wsPing = client.ws.ping;
+          
+          // Database stats
+          const totalLogs = await GuildLog.countDocuments().catch(() => 0);
+          const totalSounds = await Sound.countDocuments().catch(() => 0);
+          
+          // Top guilds by member count
+          const topGuildsByMembers = client.guilds.cache
+            .sort((a, b) => b.memberCount - a.memberCount)
+            .first(10)
+            .map((g, idx) => `${idx + 1}. **${g.name}** - ${g.memberCount} members`)
+            .join("\n");
+          
+          // Most active guilds (last 24h)
+          const guildActivity = await GuildLog.aggregate([
+            { $match: { time: { $gte: oneDayAgo } } },
+            { $group: { _id: "$guildId", count: { $sum: 1 }, name: { $first: "$guildName" } } },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ]).catch(() => []);
+          
+          const topActiveGuilds = guildActivity.length > 0
+            ? guildActivity.map((g, idx) => `${idx + 1}. **${g.name}** - ${g.count} events`).join("\n")
+            : "No activity recorded";
+          
+          const embed = new EmbedBuilder()
+            .setColor(EmbedColors.INFO)
+            .setAuthor({ 
+              name: toSmallCaps("👑 bot owner dashboard"), 
+              iconURL: client.user.displayAvatarURL() 
+            })
+            .setDescription(
+              toSmallCaps(
+                `**Bot:** ${client.user.username}\n` +
+                `**Status:** 🟢 Online & Running\n` +
+                `**Uptime:** ${uptimeText}\n` +
+                `**WebSocket Ping:** ${wsPing}ms`
+              )
+            )
+            .addFields(
+              {
+                name: toSmallCaps("📊 global stats"),
+                value: 
+                  `**Total Servers:** ${totalGuilds}\n` +
+                  `**Total Members:** ${totalMembers.toLocaleString()}\n` +
+                  `**24h Activity:** ${recentLogsCount.toLocaleString()} events\n` +
+                  `**Total Logs:** ${totalLogs.toLocaleString()}\n` +
+                  `**Total Sounds:** ${totalSounds}`,
+                inline: false
+              },
+              {
+                name: toSmallCaps("💾 system resources"),
+                value: 
+                  `**Memory Usage:** ${memUsedMB}MB / ${memTotalMB}MB\n` +
+                  `**CPU:** Node.js ${process.version}\n` +
+                  `**Platform:** ${process.platform} ${process.arch}`,
+                inline: false
+              },
+              {
+                name: toSmallCaps("🏆 top 10 servers (by members)"),
+                value: topGuildsByMembers || "No servers",
+                inline: false
+              },
+              {
+                name: toSmallCaps("⚡ most active servers (24h)"),
+                value: topActiveGuilds,
+                inline: false
+              }
+            )
+            .setFooter({ text: toSmallCaps("owner dashboard • all times in ist") })
+            .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
 
         case "logs": {
           await interaction.deferReply({ flags: 64 });
@@ -1069,15 +1477,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .slice(0, 5)
             .map(([channel, count], idx) => `${idx + 1}. **${channel}** - ${count} events`);
           
-          // Peak activity hours
+          // Peak activity hours (IST timezone)
           const hourlyActivity = {};
           logs.forEach(log => {
-            const hour = new Date(log.time).getHours();
+            // Convert to IST (UTC +5:30)
+            const date = new Date(log.time);
+            const istDate = new Date(date.getTime() + (5.5 * 60 * 60 * 1000));
+            const hour = istDate.getUTCHours();
             hourlyActivity[hour] = (hourlyActivity[hour] || 0) + 1;
           });
           
           const peakHour = Object.entries(hourlyActivity)
             .sort((a, b) => b[1] - a[1])[0];
+          
+          // Format to IST 12-hour format
+          let peakHourText = "N/A";
+          if (peakHour) {
+            const hour = parseInt(peakHour[0]);
+            const isPM = hour >= 12;
+            const hour12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+            const period = isPM ? "PM" : "AM";
+            peakHourText = `**${hour12}:00 ${period} IST** (${peakHour[1]} events)`;
+          }
           
           const embed = new EmbedBuilder()
             .setColor(EmbedColors.INFO)
@@ -1094,7 +1515,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               },
               {
                 name: "⏰ Peak Activity",
-                value: peakHour ? `**${peakHour[0]}:00** (${peakHour[1]} events)` : "N/A",
+                value: peakHourText,
                 inline: true
               },
               {
