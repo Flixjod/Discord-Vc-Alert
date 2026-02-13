@@ -120,15 +120,17 @@ const guildSettingsSchema = new mongoose.Schema({
 const GuildSettings = mongoose.model("GuildSettings", guildSettingsSchema);
 
 const logSchema = new mongoose.Schema({
-  guildId: String,
+  guildId: { type: String, required: true },
   guildName: String,
-  user: String,
+  user: { type: String, required: true },
   channel: String,
-  type: String,
+  type: { type: String, required: true, enum: ["join", "leave", "online"] },
   time: { type: Date, default: Date.now }
 });
+// Consolidated indexes (removed duplicate field-level indexes to fix warning)
 logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
 logSchema.index({ guildId: 1, time: -1 });
+logSchema.index({ guildId: 1, user: 1, time: -1 });
 const GuildLog = mongoose.model("GuildLog", logSchema);
 
 // ---------- In-memory caches & debounced writer ----------
@@ -152,7 +154,7 @@ function schedulePendingSaves() {
         console.error(`[DB SAVE] Failed to save settings for ${guildId}:`, e?.message ?? e);
       }
     }));
-  }, 700);
+  }, 300);
 }
 async function updateGuildSettings(settings) {
   if (!settings || !settings.guildId) return;
@@ -163,7 +165,7 @@ async function updateGuildSettings(settings) {
 async function getGuildSettings(guildId) {
   const cached = guildSettingsCache.get(guildId);
   if (cached) return cached;
-  let settings = await GuildSettings.findOne({ guildId }).lean().catch(() => null);
+  let settings = await GuildSettings.findOne({ guildId }).lean().select('-__v').catch(() => null);
   if (!settings) {
     settings = {
       guildId,
@@ -187,20 +189,19 @@ async function getGuildSettings(guildId) {
   return settings;
 }
 
-// ---------- Helper: log creation ----------
+// ---------- Helper: log creation (Non-blocking) ----------
 async function addLog(type, user, channel, guild) {
-  try {
-    await GuildLog.create({
-      guildId: guild.id ?? guild,
-      guildName: guild.name ?? guild,
-      user,
-      channel,
-      type,
-      time: Date.now()
-    });
-  } catch (err) {
+  // Fire and forget - don't block alert sending
+  GuildLog.create({
+    guildId: guild.id ?? guild,
+    guildName: guild.name ?? guild,
+    user,
+    channel,
+    type,
+    time: Date.now()
+  }).catch(err => {
     console.error(`[MongoDB Log Error] ${err?.message ?? err}`);
-  }
+  });
 }
 
 // ---------- Helper: generate activity file ----------
@@ -232,9 +233,11 @@ const soundSchema = new mongoose.Schema({
   fileURL: { type: String, required: true },
   storageMessageId: { type: String, default: null },
   addedBy: { type: String, default: null },
-  playCount: { type: Number, default: 0 }, // NEW: Track Popularity
+  playCount: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
 });
+soundSchema.index({ guildId: 1, name: 1 }, { unique: true });
+soundSchema.index({ guildId: 1, playCount: -1 });
 const Sound = mongoose.model("Soundboards", soundSchema);
 
 // ---------- In-memory queue & panels ----------
@@ -360,8 +363,8 @@ async function sbEnsureStorage(guild) {
   return channel;
 }
 
-// ---------- play next in queue (DOWNLOAD -> PLAY -> DELETE) ----------
-async function sbPlayNext(guild, textChannel = null) {
+// ---------- play next in queue (DOWNLOAD -> PLAY -> DELETE) with retry logic ----------
+async function sbPlayNext(guild, textChannel = null, retryCount = 0) {
   const q = getSbQueue(guild.id);
   if (textChannel) q.lastTextChannel = textChannel;
 
@@ -401,20 +404,44 @@ async function sbPlayNext(guild, textChannel = null) {
       }
     }
 
-    // 2. Download File
+    // 2. Download File with retry
     const fileExt = path.extname(new URL(downloadUrl).pathname) || ".mp3";
     const fileName = `${guild.id}_${Date.now()}${fileExt}`;
     localFilePath = path.join(TEMP_DIR, fileName);
 
     console.log(`[sb] Downloading ${next.name} to ${localFilePath}...`);
-    const response = await axios({
-      method: 'GET',
-      url: downloadUrl,
-      responseType: 'stream'
-    });
-
-    await streamPipeline(response.data, fs.createWriteStream(localFilePath));
+    
+    let downloadSuccess = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await axios({
+          method: 'GET',
+          url: downloadUrl,
+          responseType: 'stream',
+          timeout: 30000
+        });
+        await streamPipeline(response.data, fs.createWriteStream(localFilePath));
+        downloadSuccess = true;
+        break;
+      } catch (downloadErr) {
+        console.warn(`[sb] Download attempt ${attempt + 1} failed:`, downloadErr.message);
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+    
+    if (!downloadSuccess) {
+      throw new Error('Download failed after 3 attempts');
+    }
+    
     console.log(`[sb] Download complete.`);
+
+    // Verify file exists and has content
+    const stats = fs.statSync(localFilePath);
+    if (stats.size === 0) {
+      throw new Error('Downloaded file is empty');
+    }
 
     // 3. Play Local File
     const resource = createAudioResource(localFilePath, { 
@@ -451,30 +478,78 @@ async function sbPlayNext(guild, textChannel = null) {
     }
 
     if (textChannel) {
-        textChannel.send(`⚠️ **${next.name}** failed to load. Skipping...`).catch(()=>{});
+        textChannel.send(`⚠️ **${next.name}** failed to load. ${retryCount < 1 ? 'Retrying...' : 'Skipping...'}`).catch(()=>{});
     }
     q.now = null;
-    // Try next one
-    setTimeout(()=> sbPlayNext(guild, textChannel).catch(()=>{}), 1000);
+    
+    // Retry once, then skip
+    if (retryCount < 1) {
+      q.list.unshift(next); // Put back at front
+      setTimeout(() => sbPlayNext(guild, textChannel, retryCount + 1).catch(() => {}), 2000);
+    } else {
+      // Try next one
+      setTimeout(() => sbPlayNext(guild, textChannel, 0).catch(() => {}), 1000);
+    }
   }
 }
 
-// ---------- connect to VC ----------
+// ---------- connect to VC with improved error handling ----------
 async function sbConnectToMember(member) {
   if (!member.voice.channel) return { error: "not_in_vc" };
   const vc = member.voice.channel;
   const guild = member.guild;
 
   try {
+    // Check if already connected
+    const existingConn = getVoiceConnection(guild.id);
+    if (existingConn) {
+      // Verify connection is healthy
+      if (existingConn.state.status === VoiceConnectionStatus.Ready) {
+        const q = getSbQueue(guild.id);
+        q.vcId = vc.id;
+        if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
+        existingConn.subscribe(q.player);
+        return { connection: existingConn, channel: vc };
+      }
+      // Connection exists but not ready - destroy and reconnect
+      existingConn.destroy();
+    }
+
     const conn = joinVoiceChannel({
       channelId: vc.id,
       guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: false
+      selfDeaf: false,
+      selfMute: false
+    });
+
+    // Enhanced connection monitoring
+    conn.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        await Promise.race([
+          entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+        // Connection recovered
+      } catch (error) {
+        // Connection failed to recover
+        console.error('[Voice] Connection failed to recover, destroying...');
+        conn.destroy();
+        const q = getSbQueue(guild.id);
+        q.vcId = null;
+        q.list = [];
+        q.now = null;
+      }
+    });
+
+    conn.on(VoiceConnectionStatus.Destroyed, () => {
+      console.log(`[Voice] Connection destroyed for guild ${guild.id}`);
+      const q = getSbQueue(guild.id);
+      q.vcId = null;
     });
 
     try {
-      await entersState(conn, VoiceConnectionStatus.Ready, 15_000);
+      await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
     } catch (err) {
       console.error("[sb connect] Connection never became ready", err);
       conn.destroy();
@@ -486,10 +561,12 @@ async function sbConnectToMember(member) {
     
     if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
     conn.subscribe(q.player);
+    
+    console.log(`[Voice] Successfully connected to ${vc.name} in ${guild.name}`);
     return { connection: conn, channel: vc };
   } catch (err) {
     console.error("[sb connect]", err);
-    return { error: "connect_failed" };
+    return { error: "connect_failed", details: err.message };
   }
 }
 
@@ -541,7 +618,7 @@ async function buildSoundPanelEmbed(guild) {
   return { embed, buttons: [row1] };
 }
 
-// ---------- Discord client ----------
+// ---------- Discord client with improved configuration ----------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -550,7 +627,17 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildPresences
   ],
-  partials: [Partials.User, Partials.GuildMember]
+  partials: [Partials.User, Partials.GuildMember],
+  // Critical: Prevent disconnections
+  ws: {
+    properties: {
+      browser: 'Discord iOS'
+    }
+  },
+  // Improved shard handling
+  shards: 'auto',
+  // Increase timeout for slow connections
+  restRequestTimeout: 30000
 });
 
 // ---------- Embeds colors ----------
@@ -638,6 +725,33 @@ const commands = [
     .setName("resetignorerole")
     .setDescription("♻️ ʀᴇsᴇᴛ ɪɢɴᴏʀᴇ ʀᴏʟᴇ"),
   new SlashCommandBuilder()
+    .setName("ignorerole")
+    .setDescription("🙈 ᴍᴀɴᴀɢᴇ ɪɢɴᴏʀᴇᴅ ʀᴏʟᴇ sᴇᴛᴛɪɴɢs")
+    .addStringOption(opt => opt
+      .setName("action")
+      .setDescription("Select an action")
+      .setRequired(true)
+      .addChoices(
+        { name: "View", value: "view" },
+        { name: "Set", value: "set" },
+        { name: "Reset", value: "reset" },
+        { name: "Toggle On/Off", value: "toggle" }
+      ))
+    .addRoleOption(opt => opt
+      .setName("role")
+      .setDescription("Role to ignore (required for 'set' action)")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("userinfo")
+    .setDescription("👤 ɢᴇᴛ ᴅᴇᴛᴀɪʟᴇᴅ ᴜsᴇʀ ɪɴғᴏʀᴍᴀᴛɪᴏɴ")
+    .addUserOption(opt => opt
+      .setName("user")
+      .setDescription("Select a user (leave empty for your own info)")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("owner")
+    .setDescription("👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ (ᴅᴍ ᴏɴʟʏ)"),
+  new SlashCommandBuilder()
     .setName("logs")
     .setDescription("📜 ᴠɪᴇᴡ sᴇʀᴠᴇʀ ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢs")
     .addStringOption(opt => opt
@@ -661,23 +775,89 @@ const commands = [
       .addStringOption(o => o.setName("name").setDescription("sᴇʟᴇᴄᴛ").setAutocomplete(true).setRequired(true)))
     .addSubcommand(s => s.setName("list").setDescription("📜 ʟɪsᴛ"))
     .addSubcommand(s => s.setName("panel").setDescription("🎛 ᴏᴘᴇɴ ᴘᴀɴᴇʟ"))
-    // NEW COMMANDS ADDED BELOW
     .addSubcommand(s => s.setName("volume").setDescription("🔊 sᴇᴛ ᴠᴏʟᴜᴍᴇ")
       .addIntegerOption(o => o.setName("level").setDescription("0 - 100").setRequired(true).setMinValue(0).setMaxValue(100)))
-    .addSubcommand(s => s.setName("top").setDescription("🏆 ᴍᴏsᴛ ᴘʟᴀʏᴇᴅ sᴏᴜɴᴅs"))
+    .addSubcommand(s => s.setName("top").setDescription("🏆 ᴍᴏsᴛ ᴘʟᴀʏᴇᴅ sᴏᴜɴᴅs")),
+  new SlashCommandBuilder()
+    .setName("stats")
+    .setDescription("📊 sʜᴏᴡ sᴇʀᴠᴇʀ ᴀᴄᴛɪᴠɪᴛʏ sᴛᴀᴛɪsᴛɪᴄs")
+    .addStringOption(opt => opt
+      .setName("period")
+      .setDescription("ᴛɪᴍᴇ ᴘᴇʀɪᴏᴅ")
+      .setRequired(false)
+      .addChoices(
+        { name: "📅 Today", value: "today" },
+        { name: "📆 Last 7 days", value: "7days" },
+        { name: "🗓️ Last 30 days", value: "30days" },
+        { name: "📈 All time", value: "all" }
+      )),
+  new SlashCommandBuilder()
+    .setName("ping")
+    .setDescription("🏓 ᴄʜᴇᴄᴋ ʙᴏᴛ ʟᴀᴛᴇɴᴄʏ ᴀɴᴅ sᴛᴀᴛᴜs"),
+  new SlashCommandBuilder()
+    .setName("cleanup")
+    .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs")
 ].map(c => c.toJSON());
+
+// ---------- Connection Health Monitoring ----------
+let lastHeartbeat = Date.now();
+let reconnectAttempts = 0;
+let lastHeartbeatLog = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const HEARTBEAT_LOG_COOLDOWN = 5 * 60 * 1000; // 5 minutes
+
+// Monitor Gateway Health
+setInterval(() => {
+  const timeSinceLastBeat = Date.now() - lastHeartbeat;
+  if (timeSinceLastBeat > 60000) { // 60 seconds without heartbeat
+    // Only log once per 5 minutes to reduce spam
+    const now = Date.now();
+    if (now - lastHeartbeatLog > HEARTBEAT_LOG_COOLDOWN) {
+      console.warn(`⚠️ No heartbeat for ${Math.floor(timeSinceLastBeat/1000)}s - Connection may be dead`);
+      lastHeartbeatLog = now;
+    }
+    
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      if (now - lastHeartbeatLog < 1000) { // Only log reconnection if we just logged the warning
+        console.log(`🔄 Attempting reconnection (${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+      }
+      reconnectAttempts++;
+      client.destroy();
+      setTimeout(() => {
+        client.login(process.env.TOKEN).catch(e => {
+          console.error('❌ Reconnection failed:', e);
+        });
+      }, 5000);
+    }
+  }
+}, 30000); // Check every 30 seconds
 
 // ---------- Ready & register commands ----------
 client.once("clientReady", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
-  try { client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" }); } catch(e) {}
+  lastHeartbeat = Date.now();
+  reconnectAttempts = 0; // Reset on successful connection
+  
+  try { 
+    client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" }); 
+  } catch(e) { 
+    console.error('[Activity] Failed to set activity:', e); 
+  }
+  
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
   try {
+    console.log('📝 Registering slash commands...');
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("✅ Slash commands registered.");
+    console.log("✅ Slash commands registered successfully.");
   } catch (err) {
     console.error("❌ Command registration error:", err);
   }
+  
+  // Pre-warm caches
+  console.log('🔥 Pre-warming caches...');
+  const guildIds = client.guilds.cache.map(g => g.id);
+  await Promise.all(guildIds.map(id => getGuildSettings(id).catch(() => null)));
+  console.log(`✅ Cached settings for ${guildIds.length} guilds`);
 });
 
 // ---------- Interaction handler ----------
@@ -769,25 +949,697 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("👀 ignored role cleared"), description: toSmallCaps("everyone’s back on the radar 🌍\nall members will now appear in vc alerts again 💫"), color: EmbedColors.RESET, guild })], flags: 64 });
         }
 
+
+        // ------------------ NEW: UNIFIED IGNOREROLE COMMAND ------------------
+        case "ignorerole": {
+          const action = interaction.options.getString("action");
+          const role = interaction.options.getRole("role");
+          
+          if (action === "view") {
+            const statusEmoji = settings.ignoreRoleEnabled ? "🟢" : "🔴";
+            const statusText = settings.ignoreRoleEnabled ? "Activated" : "Deactivated";
+            const roleText = settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set";
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("🙈 ignore role settings"), 
+                description: toSmallCaps(
+                  `**Status:** ${statusEmoji} ${statusText}\n` +
+                  `**Ignored Role:** ${roleText}\n\n` +
+                  (settings.ignoreRoleEnabled && settings.ignoredRoleId 
+                    ? "Members with this role will be skipped in VC alerts 🚫" 
+                    : "No role is currently being ignored ✨")
+                ), 
+                color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.INFO, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          if (action === "set") {
+            if (!role) {
+              return interaction.reply({ 
+                embeds: [makeEmbed({ 
+                  title: toSmallCaps("⚠️ role required"), 
+                  description: toSmallCaps("Please provide a role to ignore.\nUse: `/ignorerole action:set role:@role`"), 
+                  color: EmbedColors.WARNING, 
+                  guild 
+                })], 
+                flags: 64 
+              });
+            }
+            
+            settings.ignoredRoleId = role.id;
+            settings.ignoreRoleEnabled = true;
+            await updateGuildSettings(settings);
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("✅ ignore role activated"), 
+                description: toSmallCaps(
+                  `Members with ${role} will now be skipped in VC alerts 🚫\n\n` +
+                  `Perfect for staff, bots, or background lurkers 😌`
+                ), 
+                color: EmbedColors.SUCCESS, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          if (action === "reset") {
+            if (!settings.ignoredRoleId) {
+              return interaction.reply({ 
+                embeds: [makeEmbed({ 
+                  title: toSmallCaps("ℹ️ no role set"), 
+                  description: toSmallCaps("There's no ignored role configured yet."), 
+                  color: EmbedColors.INFO, 
+                  guild 
+                })], 
+                flags: 64 
+              });
+            }
+            
+            settings.ignoredRoleId = null;
+            settings.ignoreRoleEnabled = false;
+            await updateGuildSettings(settings);
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("♻️ ignore role reset"), 
+                description: toSmallCaps("Everyone's back on the radar 🌍\nAll members will now appear in VC alerts again 💫"), 
+                color: EmbedColors.RESET, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          if (action === "toggle") {
+            if (!settings.ignoredRoleId) {
+              return interaction.reply({ 
+                embeds: [makeEmbed({ 
+                  title: toSmallCaps("⚠️ no role configured"), 
+                  description: toSmallCaps("Please set an ignored role first using:\n`/ignorerole action:set role:@role`"), 
+                  color: EmbedColors.WARNING, 
+                  guild 
+                })], 
+                flags: 64 
+              });
+            }
+            
+            settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
+            await updateGuildSettings(settings);
+            
+            const newStatus = settings.ignoreRoleEnabled ? "activated" : "deactivated";
+            const emoji = settings.ignoreRoleEnabled ? "✅" : "🔴";
+            
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps(`${emoji} ignore role ${newStatus}`), 
+                description: toSmallCaps(
+                  `The ignore role feature has been **${newStatus}**\n\n` +
+                  `Role: <@&${settings.ignoredRoleId}>`
+                ), 
+                color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          break;
+        }
+
+        // ------------------ NEW: USERINFO COMMAND ------------------
+        case "userinfo": {
+          await interaction.deferReply({ flags: 64 });
+          
+          const targetUser = interaction.options.getUser("user") || interaction.user;
+          const member = await guild.members.fetch(targetUser.id).catch(() => null);
+          
+          if (!member) {
+            return interaction.editReply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("❌ user not found"), 
+                description: toSmallCaps("This user is not in the server."), 
+                color: EmbedColors.ERROR, 
+                guild 
+              })] 
+            });
+          }
+          
+          // Account creation date (IST)
+          const createdDate = new Date(targetUser.createdTimestamp);
+          const createdIST = new Date(createdDate.getTime() + (5.5 * 60 * 60 * 1000));
+          const createdStr = createdIST.toLocaleDateString("en-IN", { 
+            day: "2-digit", 
+            month: "short", 
+            year: "numeric", 
+            timeZone: "Asia/Kolkata" 
+          });
+          const daysSinceCreation = Math.floor((Date.now() - targetUser.createdTimestamp) / (1000 * 60 * 60 * 24));
+          
+          // Server join date (IST)
+          const joinedDate = member.joinedAt;
+          const joinedIST = new Date(joinedDate.getTime() + (5.5 * 60 * 60 * 1000));
+          const joinedStr = joinedIST.toLocaleDateString("en-IN", { 
+            day: "2-digit", 
+            month: "short", 
+            year: "numeric", 
+            timeZone: "Asia/Kolkata" 
+          });
+          const daysSinceJoin = Math.floor((Date.now() - member.joinedTimestamp) / (1000 * 60 * 60 * 24));
+          
+          // Roles (exclude @everyone)
+          const roles = member.roles.cache
+            .filter(r => r.id !== guild.id)
+            .sort((a, b) => b.position - a.position)
+            .map(r => `<@&${r.id}>`)
+            .slice(0, 20);
+          const roleText = roles.length > 0 ? roles.join(", ") : "No roles";
+          const roleCount = member.roles.cache.size - 1;
+          
+          // Key permissions
+          const keyPerms = [];
+          if (member.permissions.has(PermissionFlagsBits.Administrator)) keyPerms.push("👑 Administrator");
+          if (member.permissions.has(PermissionFlagsBits.ManageGuild)) keyPerms.push("🛠️ Manage Server");
+          if (member.permissions.has(PermissionFlagsBits.ManageChannels)) keyPerms.push("📁 Manage Channels");
+          if (member.permissions.has(PermissionFlagsBits.ManageRoles)) keyPerms.push("🎭 Manage Roles");
+          if (member.permissions.has(PermissionFlagsBits.KickMembers)) keyPerms.push("🚪 Kick Members");
+          if (member.permissions.has(PermissionFlagsBits.BanMembers)) keyPerms.push("🔨 Ban Members");
+          const permsText = keyPerms.length > 0 ? keyPerms.join(", ") : "No special permissions";
+          
+          // Status and badges
+          const status = member.presence?.status || "offline";
+          const statusEmoji = status === "online" ? "🟢" : status === "idle" ? "🟡" : status === "dnd" ? "🔴" : "⚫";
+          const statusText = status.charAt(0).toUpperCase() + status.slice(1);
+          
+          const badges = [];
+          if (member.user.bot) badges.push("🤖 Bot");
+          if (member.premiumSince) badges.push("💎 Server Booster");
+          if (targetUser.id === guild.ownerId) badges.push("👑 Server Owner");
+          const badgesText = badges.length > 0 ? badges.join(", ") : "No badges";
+          
+          // Voice channel
+          const voiceChannel = member.voice.channel;
+          const voiceText = voiceChannel ? `🎧 ${voiceChannel.name}` : "Not in voice";
+          
+          const embed = new EmbedBuilder()
+            .setColor(member.displayHexColor || EmbedColors.INFO)
+            .setAuthor({ 
+              name: `${member.user.username}'s Profile`, 
+              iconURL: targetUser.displayAvatarURL({ dynamic: true, size: 256 }) 
+            })
+            .setThumbnail(targetUser.displayAvatarURL({ dynamic: true, size: 256 }))
+            .setDescription(
+              `**User:** ${targetUser}\n` +
+              `**Display Name:** ${member.displayName}\n` +
+              `**Status:** ${statusEmoji} ${statusText}\n` +
+              `**Voice:** ${voiceText}`
+            )
+            .addFields(
+              {
+                name: "📅 Account Created",
+                value: `${createdStr}\n(${daysSinceCreation} days ago)`,
+                inline: true
+              },
+              {
+                name: "📥 Joined Server",
+                value: `${joinedStr}\n(${daysSinceJoin} days ago)`,
+                inline: true
+              },
+              {
+                name: "🏅 Badges",
+                value: badgesText,
+                inline: false
+              },
+              {
+                name: `🎭 Roles (${roleCount})`,
+                value: roleText,
+                inline: false
+              },
+              {
+                name: "🔑 Key Permissions",
+                value: permsText,
+                inline: false
+              }
+            )
+            .setFooter({ text: `ID: ${targetUser.id} • All times in IST` })
+            .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+        // ------------------ NEW: OWNER COMMAND ------------------
+        case "owner": {
+          // Check if DM or regular guild
+          if (interaction.guild) {
+            return interaction.reply({ 
+              embeds: [makeEmbed({ 
+                title: toSmallCaps("🔒 dm only command"), 
+                description: toSmallCaps("This command can only be used in DMs with the bot.\nPlease send me a direct message and try again."), 
+                color: EmbedColors.WARNING, 
+                guild 
+              })], 
+              flags: 64 
+            });
+          }
+          
+          // Check if user is the bot owner
+          const OWNER_ID = process.env.OWNER_ID;
+          if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
+            return interaction.reply({ 
+              embeds: [new EmbedBuilder()
+                .setColor(EmbedColors.ERROR)
+                .setTitle(toSmallCaps("🚫 unauthorized"))
+                .setDescription(toSmallCaps("Only the bot owner can use this command."))
+                .setTimestamp()
+              ], 
+              flags: 64 
+            });
+          }
+          
+          await interaction.deferReply({ flags: 64 });
+          
+          // Gather bot statistics
+          const totalGuilds = client.guilds.cache.size;
+          const totalMembers = client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0);
+          
+          // Recent activity (last 24 hours)
+          const oneDayAgo = new Date(Date.now() - (24 * 60 * 60 * 1000));
+          const recentLogsCount = await GuildLog.countDocuments({ time: { $gte: oneDayAgo } }).catch(() => 0);
+          
+          // Memory usage
+          const memUsage = process.memoryUsage();
+          const memUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(2);
+          const memTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(2);
+          
+          // Uptime
+          const uptimeSecs = Math.floor(process.uptime());
+          const days = Math.floor(uptimeSecs / 86400);
+          const hours = Math.floor((uptimeSecs % 86400) / 3600);
+          const minutes = Math.floor((uptimeSecs % 3600) / 60);
+          const uptimeText = `${days}d ${hours}h ${minutes}m`;
+          
+          // WebSocket ping
+          const wsPing = client.ws.ping;
+          
+          // Database stats
+          const totalLogs = await GuildLog.countDocuments().catch(() => 0);
+          const totalSounds = await Sound.countDocuments().catch(() => 0);
+          
+          // Top guilds by member count
+          const topGuildsByMembers = client.guilds.cache
+            .sort((a, b) => b.memberCount - a.memberCount)
+            .first(10)
+            .map((g, idx) => `${idx + 1}. **${g.name}** - ${g.memberCount} members`)
+            .join("\n");
+          
+          // Most active guilds (last 24h)
+          const guildActivity = await GuildLog.aggregate([
+            { $match: { time: { $gte: oneDayAgo } } },
+            { $group: { _id: "$guildId", count: { $sum: 1 }, name: { $first: "$guildName" } } },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ]).catch(() => []);
+          
+          const topActiveGuilds = guildActivity.length > 0
+            ? guildActivity.map((g, idx) => `${idx + 1}. **${g.name}** - ${g.count} events`).join("\n")
+            : "No activity recorded";
+          
+          const embed = new EmbedBuilder()
+            .setColor(EmbedColors.INFO)
+            .setAuthor({ 
+              name: toSmallCaps("👑 bot owner dashboard"), 
+              iconURL: client.user.displayAvatarURL() 
+            })
+            .setDescription(
+              toSmallCaps(
+                `**Bot:** ${client.user.username}\n` +
+                `**Status:** 🟢 Online & Running\n` +
+                `**Uptime:** ${uptimeText}\n` +
+                `**WebSocket Ping:** ${wsPing}ms`
+              )
+            )
+            .addFields(
+              {
+                name: toSmallCaps("📊 global stats"),
+                value: 
+                  `**Total Servers:** ${totalGuilds}\n` +
+                  `**Total Members:** ${totalMembers.toLocaleString()}\n` +
+                  `**24h Activity:** ${recentLogsCount.toLocaleString()} events\n` +
+                  `**Total Logs:** ${totalLogs.toLocaleString()}\n` +
+                  `**Total Sounds:** ${totalSounds}`,
+                inline: false
+              },
+              {
+                name: toSmallCaps("💾 system resources"),
+                value: 
+                  `**Memory Usage:** ${memUsedMB}MB / ${memTotalMB}MB\n` +
+                  `**CPU:** Node.js ${process.version}\n` +
+                  `**Platform:** ${process.platform} ${process.arch}`,
+                inline: false
+              },
+              {
+                name: toSmallCaps("🏆 top 10 servers (by members)"),
+                value: topGuildsByMembers || "No servers",
+                inline: false
+              },
+              {
+                name: toSmallCaps("⚡ most active servers (24h)"),
+                value: topActiveGuilds,
+                inline: false
+              }
+            )
+            .setFooter({ text: toSmallCaps("owner dashboard • all times in ist") })
+            .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+
         case "logs": {
           await interaction.deferReply({ flags: 64 });
-          const logs = await GuildLog.find({ guildId: guild.id }).sort({ time: -1 }).limit(20).lean();
+          
+          // Get range and user options
+          const rangeOpt = interaction.options.getString("range") || "today";
+          const userOpt = interaction.options.getUser("user");
+          
+          // Calculate date range
+          const now = Date.now();
+          let startTime;
+          switch (rangeOpt) {
+            case "today":
+              const todayStart = new Date();
+              todayStart.setHours(0, 0, 0, 0);
+              startTime = todayStart.getTime();
+              break;
+            case "yesterday":
+              const yesterdayStart = new Date();
+              yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+              yesterdayStart.setHours(0, 0, 0, 0);
+              startTime = yesterdayStart.getTime();
+              const yesterdayEnd = new Date(yesterdayStart);
+              yesterdayEnd.setHours(23, 59, 59, 999);
+              break;
+            case "7days":
+              startTime = now - (7 * 24 * 60 * 60 * 1000);
+              break;
+            case "30days":
+              startTime = now - (30 * 24 * 60 * 60 * 1000);
+              break;
+            default:
+              startTime = now - (24 * 60 * 60 * 1000);
+          }
+          
+          // Build query
+          const query = { guildId: guild.id, time: { $gte: new Date(startTime) } };
+          if (rangeOpt === "yesterday") {
+            const yesterdayEnd = new Date();
+            yesterdayEnd.setHours(0, 0, 0, 0);
+            query.time.$lt = yesterdayEnd;
+          }
+          if (userOpt) {
+            query.user = { $regex: `^${userOpt.tag}`, $options: "i" };
+          }
+          
+          const logs = await GuildLog.find(query).sort({ time: -1 }).limit(100).lean();
 
           if (logs.length === 0) {
-            return interaction.editReply({ embeds: [makeEmbed({ title: toSmallCaps("No recent activity found"), description: toSmallCaps(""), color: EmbedColors.INFO, guild })] });
+            return interaction.editReply({ embeds: [makeEmbed({ title: "No activity found", description: `No logs found for the selected ${userOpt ? 'user and ' : ''}time range.`, color: EmbedColors.INFO, guild })] });
           }
 
-          const desc = logs.map(l => {
+          const desc = logs.slice(0, 20).map(l => {
             const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
             const ago = fancyAgo(Date.now() - l.time);
             const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
             return `**${emoji} ${l.type.toUpperCase()}** — ${l.user} ${action} ${l.channel}\n> 🕒 ${ago} • ${toISTString(l.time)}`;
           }).join("\n\n");
 
-          const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(toSmallCaps(`${guild.name} recent activity`)).setDescription(toSmallCaps(desc)).setFooter({ text: toSmallCaps(`Showing latest ${logs.length} entries • Server: ${guild.name}`) }).setTimestamp();
+          const rangeText = rangeOpt === "today" ? "Today" : rangeOpt === "yesterday" ? "Yesterday" : rangeOpt === "7days" ? "Last 7 Days" : "Last 30 Days";
+          const userText = userOpt ? ` for ${userOpt.tag}` : "";
+          const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(`${guild.name} Activity - ${rangeText}${userText}`).setDescription(desc).setFooter({ text: `Showing ${Math.min(20, logs.length)} of ${logs.length} entries • Server: ${guild.name}` }).setTimestamp();
           const filePath = await generateActivityFile(guild, logs);
           await interaction.followUp({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }], ephemeral: false });
           return;
+        }
+
+        // ------------------ NEW: STATS COMMAND ------------------
+        case "stats": {
+          await interaction.deferReply({ flags: 64 });
+          const period = interaction.options.getString("period") || "today";
+          
+          // Calculate time range
+          const now = Date.now();
+          let startTime;
+          let periodLabel;
+          
+          switch (period) {
+            case "today":
+              const todayStart = new Date();
+              todayStart.setHours(0, 0, 0, 0);
+              startTime = todayStart.getTime();
+              periodLabel = "Today";
+              break;
+            case "7days":
+              startTime = now - (7 * 24 * 60 * 60 * 1000);
+              periodLabel = "Last 7 Days";
+              break;
+            case "30days":
+              startTime = now - (30 * 24 * 60 * 60 * 1000);
+              periodLabel = "Last 30 Days";
+              break;
+            case "all":
+              startTime = 0;
+              periodLabel = "All Time";
+              break;
+            default:
+              startTime = now - (7 * 24 * 60 * 60 * 1000);
+              periodLabel = "Last 7 Days";
+          }
+          
+          // Fetch logs
+          const query = { guildId: guild.id };
+          if (startTime > 0) {
+            query.time = { $gte: new Date(startTime) };
+          }
+          
+          const logs = await GuildLog.find(query).lean();
+          
+          if (logs.length === 0) {
+            return interaction.editReply({ 
+              embeds: [makeEmbed({ 
+                title: "📊 No Statistics Available", 
+                description: "No activity recorded for this period.", 
+                color: EmbedColors.INFO, 
+                guild 
+              })] 
+            });
+          }
+          
+          // Calculate statistics
+          const joinCount = logs.filter(l => l.type === "join").length;
+          const leaveCount = logs.filter(l => l.type === "leave").length;
+          const onlineCount = logs.filter(l => l.type === "online").length;
+          
+          // Most active users
+          const userActivity = {};
+          logs.forEach(log => {
+            if (!userActivity[log.user]) {
+              userActivity[log.user] = { joins: 0, leaves: 0, online: 0, total: 0 };
+            }
+            if (log.type === "join") userActivity[log.user].joins++;
+            if (log.type === "leave") userActivity[log.user].leaves++;
+            if (log.type === "online") userActivity[log.user].online++;
+            userActivity[log.user].total++;
+          });
+          
+          const topUsers = Object.entries(userActivity)
+            .sort((a, b) => b[1].total - a[1].total)
+            .slice(0, 5)
+            .map(([user, stats], idx) => {
+              const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `${idx + 1}.`;
+              return `${medal} **${user}** - ${stats.total} events (${stats.joins} joins, ${stats.leaves} leaves)`;
+            });
+          
+          // Most active channels
+          const channelActivity = {};
+          logs.forEach(log => {
+            if (log.channel && log.channel !== "-") {
+              channelActivity[log.channel] = (channelActivity[log.channel] || 0) + 1;
+            }
+          });
+          
+          const topChannels = Object.entries(channelActivity)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([channel, count], idx) => `${idx + 1}. **${channel}** - ${count} events`);
+          
+          // Peak activity hours (IST timezone)
+          const hourlyActivity = {};
+          logs.forEach(log => {
+            // Convert to IST (UTC +5:30)
+            const date = new Date(log.time);
+            const istDate = new Date(date.getTime() + (5.5 * 60 * 60 * 1000));
+            const hour = istDate.getUTCHours();
+            hourlyActivity[hour] = (hourlyActivity[hour] || 0) + 1;
+          });
+          
+          const peakHour = Object.entries(hourlyActivity)
+            .sort((a, b) => b[1] - a[1])[0];
+          
+          // Format to IST 12-hour format
+          let peakHourText = "N/A";
+          if (peakHour) {
+            const hour = parseInt(peakHour[0]);
+            const isPM = hour >= 12;
+            const hour12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+            const period = isPM ? "PM" : "AM";
+            peakHourText = `**${hour12}:00 ${period} IST** (${peakHour[1]} events)`;
+          }
+          
+          const embed = new EmbedBuilder()
+            .setColor(EmbedColors.INFO)
+            .setTitle(`📊 Server Activity Statistics`)
+            .setDescription(`**${periodLabel}** - ${guild.name}`)
+            .addFields(
+              {
+                name: "📈 Overview",
+                value: `Total Events: **${logs.length}**\n` +
+                       `🟢 Joins: **${joinCount}**\n` +
+                       `🔴 Leaves: **${leaveCount}**\n` +
+                       `💠 Online: **${onlineCount}**`,
+                inline: true
+              },
+              {
+                name: "⏰ Peak Activity",
+                value: peakHourText,
+                inline: true
+              },
+              {
+                name: "👥 Most Active Users",
+                value: topUsers.length > 0 ? topUsers.join("\n") : "No data",
+                inline: false
+              }
+            );
+          
+          if (topChannels.length > 0) {
+            embed.addFields({
+              name: "🎧 Most Active Voice Channels",
+              value: topChannels.join("\n"),
+              inline: false
+            });
+          }
+          
+          embed.setFooter({ text: `Analyzed ${logs.length} events` })
+               .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+        // ------------------ NEW: PING COMMAND ------------------
+        case "ping": {
+          const startTime = Date.now();
+          await interaction.deferReply({ flags: 64 });
+          const apiLatency = Date.now() - startTime;
+          const wsLatency = client.ws.ping;
+          
+          let statusEmoji = "🟢";
+          let statusText = "Excellent";
+          if (wsLatency > 200 || apiLatency > 500) {
+            statusEmoji = "🟡";
+            statusText = "Good";
+          }
+          if (wsLatency > 500 || apiLatency > 1000) {
+            statusEmoji = "🟠";
+            statusText = "Fair";
+          }
+          if (wsLatency > 1000 || apiLatency > 2000) {
+            statusEmoji = "🔴";
+            statusText = "Poor";
+          }
+          
+          const uptime = process.uptime();
+          const hours = Math.floor(uptime / 3600);
+          const minutes = Math.floor((uptime % 3600) / 60);
+          
+          const embed = new EmbedBuilder()
+            .setColor(EmbedColors.INFO)
+            .setTitle("🏓 Pong!")
+            .setDescription(
+              `**Connection Status:** ${statusEmoji} ${statusText}\n\n` +
+              `**Latency Info:**\n` +
+              `> 🌐 API Latency: \`${apiLatency}ms\`\n` +
+              `> 📡 WebSocket Ping: \`${wsLatency}ms\`\n` +
+              `> ⏱️ Uptime: \`${hours}h ${minutes}m\``
+            )
+            .setFooter({ text: "Bot Health Monitor" })
+            .setTimestamp();
+          
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+        // ------------------ NEW: CLEANUP COMMAND ------------------
+        case "cleanup": {
+          if (!await checkAdmin(interaction)) return;
+          
+          await interaction.deferReply({ flags: 64 });
+          
+          try {
+            // Count logs older than 30 days
+            const thirtyDaysAgo = new Date(Date.now() - (30 * 24 * 60 * 60 * 1000));
+            const oldLogsCount = await GuildLog.countDocuments({ 
+              guildId: guild.id, 
+              time: { $lt: thirtyDaysAgo } 
+            });
+            
+            // Delete old logs
+            if (oldLogsCount > 0) {
+              await GuildLog.deleteMany({ 
+                guildId: guild.id, 
+                time: { $lt: thirtyDaysAgo } 
+              });
+            }
+            
+            // Clean temp directory
+            const tempFiles = fs.readdirSync(TEMP_DIR);
+            let cleanedFiles = 0;
+            for (const file of tempFiles) {
+              const filePath = path.join(TEMP_DIR, file);
+              const stats = fs.statSync(filePath);
+              // Delete files older than 1 hour
+              if (Date.now() - stats.mtimeMs > 3600000) {
+                fs.unlinkSync(filePath);
+                cleanedFiles++;
+              }
+            }
+            
+            const embed = new EmbedBuilder()
+              .setColor(EmbedColors.SUCCESS)
+              .setTitle("🧹 Cleanup Complete")
+              .setDescription(
+                `Successfully cleaned up old data:\n\n` +
+                `📜 Removed **${oldLogsCount}** old log entries (>30 days)\n` +
+                `📁 Cleaned **${cleanedFiles}** temporary files\n` +
+                `💾 Database optimized`
+              )
+              .setFooter({ text: "Cleanup performed successfully" })
+              .setTimestamp();
+            
+            return interaction.editReply({ embeds: [embed] });
+          } catch (error) {
+            console.error("[Cleanup Error]", error);
+            return interaction.editReply({ 
+              embeds: [makeEmbed({ 
+                title: "❌ Cleanup Failed", 
+                description: "An error occurred during cleanup. Check logs for details.", 
+                color: EmbedColors.ERROR, 
+                guild 
+              })] 
+            });
+          }
         }
 
         // ------------------ SOUND-BOARD: top-level 'sound' command ------------------
@@ -858,7 +1710,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           // ----- /sound top (NEW) -----
           if (sub === "top") {
-             const docs = await Sound.find({ guildId }).sort({ playCount: -1 }).limit(10);
+             const docs = await Sound.find({ guildId }).select('name playCount').sort({ playCount: -1 }).limit(10).lean();
              if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds played yet")).setTimestamp() ], flags: 64 });
              
              const text = docs.map((s, idx) => {
@@ -889,10 +1741,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           // ----- /sound list -----
           if (sub === "list") {
-            const docs = await Sound.find({ guildId }).sort({ name: 1 });
+            const docs = await Sound.find({ guildId }).select('name playCount').sort({ name: 1 }).lean();
             if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds added")).setTimestamp() ], flags: 64 });
             // Limit text size
-            const text = docs.slice(0, 40).map((s, idx) => `\`${idx+1}.\` **${s.name}**`).join("\n");
+            const text = docs.slice(0, 40).map((s, idx) => `\`${idx+1}.\` **${s.name}** (${s.playCount} plays)`).join("\n");
             const more = docs.length > 40 ? `\n...and ${docs.length - 40} more` : "";
             return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(toSmallCaps(text + more)).setFooter({ text: toSmallCaps(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp() ], flags: 64 });
           }
@@ -1053,7 +1905,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.commandName !== "sound") return;
       const sub = interaction.options.getSubcommand();
       const focused = (interaction.options.getFocused() || "").toString().toLowerCase();
-      const sounds = await Sound.find({ guildId }).select("name").lean().catch(()=>[]);
+      const sounds = await Sound.find({ guildId }).select("name").limit(100).lean().catch(()=>[]);
       const names = sounds.map(s => s.name);
 
       if (sub === "add") {
@@ -1076,7 +1928,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
 const activeVCThreads = new Map();
 const threadDeletionTimeouts = new Map();
 const vcLocks = new Map();
-const THREAD_INACTIVITY_MS = 5 * 60 * 1000; 
+const threadLastActivity = new Map(); // Track last activity per thread
+const THREAD_INACTIVITY_MS = 5 * 60 * 1000;
+const THREAD_CHECK_INTERVAL = 30 * 1000; // Check every 30 seconds
+
+// Thread cleanup monitor (prevents 50-60min delays)
+setInterval(() => {
+  const now = Date.now();
+  for (const [vcId, lastActivity] of threadLastActivity.entries()) {
+    if (now - lastActivity >= THREAD_INACTIVITY_MS) {
+      const thread = activeVCThreads.get(vcId);
+      if (thread) {
+        thread.delete().catch(() => {});
+        activeVCThreads.delete(vcId);
+        threadLastActivity.delete(vcId);
+        if (threadDeletionTimeouts.has(vcId)) {
+          clearTimeout(threadDeletionTimeouts.get(vcId));
+          threadDeletionTimeouts.delete(vcId);
+        }
+        console.log(`[Thread Cleanup] 🗑️ Auto-deleted inactive thread for VC ${vcId}`);
+      }
+    }
+  }
+}, THREAD_CHECK_INTERVAL); 
 
 async function withVCLock(vcId, fn) {
   const prev = vcLocks.get(vcId) || Promise.resolve();
@@ -1122,11 +1996,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     const botAvatar = client.user.displayAvatarURL();
     let embed;
     if (joined) {
-      await addLog("join", user.tag, vc.name, guild);
-      embed = new EmbedBuilder().setColor(EmbedColors.VC_JOIN).setAuthor({ name: toSmallCaps(`${user.username} just popped in! 🔊`), iconURL: avatar }).setDescription(toSmallCaps(`🎧 ${user.username} joined ${vc.name} — let the vibes begin!`)).setFooter({ text: toSmallCaps("🎉 welcome to the voice party!"), iconURL: botAvatar }).setTimestamp();
+      addLog("join", user.tag, vc.name, guild); // Non-blocking
+      embed = new EmbedBuilder().setColor(EmbedColors.VC_JOIN).setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar }).setDescription(`🎧 **${user.username}** joined ${vc.name} — let the vibes begin!`).setFooter({ text: "🎉 welcome to the voice party!", iconURL: botAvatar }).setTimestamp();
     } else if (left) {
-      await addLog("leave", user.tag, vc.name, guild);
-      embed = new EmbedBuilder().setColor(EmbedColors.VC_LEAVE).setAuthor({ name: toSmallCaps(`${user.username} dipped out! 🏃‍♂️`), iconURL: avatar }).setDescription(toSmallCaps(`👋 ${user.username} left ${vc.name} — see ya next time!`)).setFooter({ text: toSmallCaps("💨 gone but not forgotten."), iconURL: botAvatar }).setTimestamp();
+      addLog("leave", user.tag, vc.name, guild); // Non-blocking
+      embed = new EmbedBuilder().setColor(EmbedColors.VC_LEAVE).setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar }).setDescription(`👋 **${user.username}** left ${vc.name} — see ya next time!`).setFooter({ text: "💨 gone but not forgotten.", iconURL: botAvatar }).setTimestamp();
     } else return;
 
     await withVCLock(vc.id, async () => {
@@ -1140,12 +2014,17 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
           try {
             thread = await logChannel.threads.create({ name: `🔊│${shortName} • VC Alerts`, type: ChannelType.PrivateThread, autoArchiveDuration: 1440, reason: `Private VC alert thread for ${vc.name}` });
             activeVCThreads.set(vc.id, thread);
+            threadLastActivity.set(vc.id, Date.now());
             console.log(`[VC Thread] 🧵 Created new thread for ${vc.name}`);
           } catch (err) { console.warn(`[VC Thread] Failed to create thread for ${vc.name}:`, err.message); return; }
         }
+        
+        // Update last activity timestamp
+        threadLastActivity.set(vc.id, Date.now());
+        
         if (threadDeletionTimeouts.has(vc.id)) clearTimeout(threadDeletionTimeouts.get(vc.id));
         const timeout = setTimeout(async () => {
-          try { await thread.delete().catch(() => {}); console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`); } finally { activeVCThreads.delete(vc.id); threadDeletionTimeouts.delete(vc.id); }
+          try { await thread.delete().catch(() => {}); console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`); } finally { activeVCThreads.delete(vc.id); threadDeletionTimeouts.delete(vc.id); threadLastActivity.delete(vc.id); }
         }, THREAD_INACTIVITY_MS);
         timeout.unref();
         threadDeletionTimeouts.set(vc.id, timeout);
@@ -1174,8 +2053,8 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
     const channel = await fetchTextChannel(member.guild, settings.textChannelId);
     if (!channel) return;
 
-    const embed = new EmbedBuilder().setColor(EmbedColors.ONLINE).setAuthor({ name: toSmallCaps(`${member.user.username} just came online! 🟢`), iconURL: member.user.displayAvatarURL({ dynamic: true }) }).setDescription(toSmallCaps(`👀 ${member.user.username} is now online — something's cooking!`)).setFooter({ text: toSmallCaps("✨ Ready to vibe!"), iconURL: client.user.displayAvatarURL() }).setTimestamp();
-    await addLog("online", member.user.tag, "-", member.guild);
+    const embed = new EmbedBuilder().setColor(EmbedColors.ONLINE).setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) }).setDescription(`👀 **${member.user.username}** is now online — something's cooking!`).setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() }).setTimestamp();
+    addLog("online", member.user.tag, "-", member.guild); // Non-blocking
     const msg = await channel.send({ embeds: [embed] }).catch(e => console.warn(`Failed to send online alert for ${member.user.username}:`, e?.message ?? e));
     if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
   } catch (e) { console.error("[presenceUpdate] Handler error:", e?.stack ?? e?.message ?? e); }
@@ -1216,12 +2095,106 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => { console.error('[uncaughtException]', err); shutdown('uncaughtException'); });
 process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason); });
 
-(async () => {
+// ---------- Gateway Connection Event Handlers ----------
+client.on('warn', (info) => {
+  console.warn('[Discord Warning]', info);
+});
+
+client.on('error', (error) => {
+  console.error('[Discord Error]', error);
+});
+
+client.on('shardError', (error) => {
+  console.error('[Shard Error]', error);
+});
+
+client.on('shardReconnecting', (id) => {
+  console.log(`🔄 Shard ${id} reconnecting...`);
+  lastHeartbeat = Date.now();
+});
+
+client.on('shardResume', (id, replayedEvents) => {
+  console.log(`✅ Shard ${id} resumed (${replayedEvents} events replayed)`);
+  lastHeartbeat = Date.now();
+  reconnectAttempts = 0;
+});
+
+client.on('shardDisconnect', (event, id) => {
+  console.warn(`⚠️ Shard ${id} disconnected (${event.code}: ${event.reason})`);
+});
+
+// Heartbeat monitoring
+client.ws.on('HEARTBEAT', () => {
+  lastHeartbeat = Date.now();
+});
+
+// ---------- MongoDB Connection with Retry ----------
+let mongoRetries = 0;
+const MAX_MONGO_RETRIES = 5;
+
+async function connectMongoDB() {
   try {
     if (!process.env.MONGO_URI) throw new Error("MONGO_URI not provided in .env");
-    await mongoose.connect(process.env.MONGO_URI, { dbName: "Discord-Alert-Bot" });
-    console.log("✅ MongoDB Connected to DB");
-  } catch (e) { console.error("❌ MongoDB connection error:", e?.message ?? e); process.exit(1); }
-  if (!process.env.TOKEN) { console.error("❌ TOKEN not set in .env"); process.exit(1); }
-  client.login(process.env.TOKEN).catch(err => console.error("❌ Login failed:", err));
+    
+    await mongoose.connect(process.env.MONGO_URI, { 
+      dbName: "Discord-Alert-Bot",
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      minPoolSize: 2,
+      retryWrites: true,
+      retryReads: true
+    });
+    
+    console.log("✅ MongoDB Connected successfully");
+    mongoRetries = 0;
+    return true;
+  } catch (e) {
+    console.error("❌ MongoDB connection error:", e?.message ?? e);
+    
+    if (mongoRetries < MAX_MONGO_RETRIES) {
+      mongoRetries++;
+      console.log(`🔄 Retrying MongoDB connection (${mongoRetries}/${MAX_MONGO_RETRIES}) in 5s...`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      return connectMongoDB();
+    }
+    
+    console.error('❌ MongoDB connection failed after max retries');
+    process.exit(1);
+  }
+}
+
+// MongoDB error handlers
+mongoose.connection.on('error', (err) => {
+  console.error('[MongoDB Error]', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('⚠️ MongoDB disconnected. Attempting to reconnect...');
+  connectMongoDB();
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('✅ MongoDB reconnected');
+});
+
+// ---------- Start Bot ----------
+(async () => {
+  // Connect to MongoDB first
+  await connectMongoDB();
+  
+  // Validate Discord token
+  if (!process.env.TOKEN) { 
+    console.error("❌ TOKEN not set in .env"); 
+    process.exit(1); 
+  }
+  
+  // Login to Discord
+  try {
+    console.log('🔐 Logging in to Discord...');
+    await client.login(process.env.TOKEN);
+  } catch (err) {
+    console.error("❌ Discord login failed:", err);
+    process.exit(1);
+  }
 })();
