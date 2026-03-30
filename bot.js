@@ -1216,15 +1216,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 .setColor(EmbedColors.WARNING)
                 .setAuthor({ name: toSmallCaps("👑 ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
                 .setDescription(
-                  toSmallCaps("💡 ᴛɪᴘ: ᴜsᴇ ᴛʜɪs ᴄᴏᴍᴍᴀɴᴅ ɪɴ ᴅᴍ ꜰᴏʀ ᴛʜᴇ ꜰᴜʟʟ ᴅᴀsʜʙᴏᴀʀᴅ ✨
-
-") +
-                  `> 🌐 **Servers:** ${tg}
-` +
-                  `> 👥 **Total Members:** ${tm.toLocaleString()}
-` +
-                  `> 📡 **WS Ping:** ${client.ws.ping}ms
-` +
+                  toSmallCaps("💡 ᴛɪᴘ: ᴜsᴇ ᴛʜɪs ᴄᴏᴍᴍᴀɴᴅ ɪɴ ᴅᴍ ꜰᴏʀ ᴛʜᴇ ꜰᴜʟʟ ᴅᴀsʜʙᴏᴀʀᴅ ✨\n\n") +
+                  `> 🌐 **Servers:** ${tg}\n` +
+                  `> 👥 **Total Members:** ${tm.toLocaleString()}\n` +
+                  `> 📡 **WS Ping:** ${client.ws.ping}ms\n` +
                   `> ⏱️ **Uptime:** ${dSQ}d ${hSQ}h ${mSQ}m`
                 )
                 .setFooter({ text: toSmallCaps("dm the bot to see full analytics") })
