@@ -796,7 +796,14 @@ const commands = [
     .setDescription("🏓 ᴄʜᴇᴄᴋ ʙᴏᴛ ʟᴀᴛᴇɴᴄʏ ᴀɴᴅ sᴛᴀᴛᴜs"),
   new SlashCommandBuilder()
     .setName("cleanup")
-    .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs")
+    .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs"),
+  new SlashCommandBuilder()
+    .setName("inv")
+    .setDescription("📨 ɪɴᴠɪᴛᴇ ᴀ ᴜsᴇʀ ᴛᴏ ʏᴏᴜʀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ")
+    .addUserOption(opt => opt
+      .setName("user")
+      .setDescription("Select a user to invite to your voice channel")
+      .setRequired(true))
 ].map(c => c.toJSON());
 
 // ---------- Connection Health Monitoring ----------
@@ -1640,6 +1647,199 @@ client.on(Events.InteractionCreate, async (interaction) => {
               })] 
             });
           }
+        }
+
+        // ------------------ /inv COMMAND ------------------
+        case "inv": {
+          await interaction.deferReply({ flags: 64 });
+
+          // 1. Check if the invoker is currently in a Voice Channel
+          const invokerMember = await guild.members.fetch(interaction.user.id).catch(() => null);
+          const invokerVC = invokerMember?.voice?.channel;
+
+          if (!invokerVC) {
+            return interaction.editReply({
+              embeds: [makeEmbed({
+                title: toSmallCaps("🎧 ɴᴏᴛ ɪɴ ᴀ ᴠᴄ"),
+                description: toSmallCaps("you need to be in a voice channel to use /inv.\njoin a vc first, then invite someone 🎙️"),
+                color: EmbedColors.WARNING,
+                guild
+              })]
+            });
+          }
+
+          // 2. Get the target user
+          const targetUser = interaction.options.getUser("user");
+          const targetMember = await guild.members.fetch(targetUser.id).catch(() => null);
+
+          if (!targetMember) {
+            return interaction.editReply({
+              embeds: [makeEmbed({
+                title: toSmallCaps("❌ ᴜsᴇʀ ɴᴏᴛ ғᴏᴜɴᴅ"),
+                description: toSmallCaps("that user is not in this server."),
+                color: EmbedColors.ERROR,
+                guild
+              })]
+            });
+          }
+
+          if (targetUser.id === interaction.user.id) {
+            return interaction.editReply({
+              embeds: [makeEmbed({
+                title: toSmallCaps("🤔 ᴛʜᴀᴛ's ʏᴏᴜ"),
+                description: toSmallCaps("you can't invite yourself 😅"),
+                color: EmbedColors.WARNING,
+                guild
+              })]
+            });
+          }
+
+          if (targetUser.bot) {
+            return interaction.editReply({
+              embeds: [makeEmbed({
+                title: toSmallCaps("🤖 ᴛʜᴀᴛ's ᴀ ʙᴏᴛ"),
+                description: toSmallCaps("bots can't be invited like this 🤷"),
+                color: EmbedColors.WARNING,
+                guild
+              })]
+            });
+          }
+
+          // 3. Check if the target user has VIEW access to invoker's VC
+          const targetPerms = invokerVC.permissionsFor(targetMember);
+          const canAccess = targetPerms?.has(PermissionsBitField.Flags.ViewChannel) &&
+                            targetPerms?.has(PermissionsBitField.Flags.Connect);
+
+          if (!canAccess) {
+            return interaction.editReply({
+              embeds: [makeEmbed({
+                title: toSmallCaps("🚫 ɴᴏ ᴀᴄᴄᴇss"),
+                description: toSmallCaps(
+                  `**${targetMember.displayName}** doesn't have access to **${invokerVC.name}**.\n` +
+                  `they can't be invited to that vc 🔒`
+                ),
+                color: EmbedColors.ERROR,
+                guild
+              })]
+            });
+          }
+
+          // 4a. If target is already in the same VC
+          if (targetMember.voice?.channelId === invokerVC.id) {
+            return interaction.editReply({
+              embeds: [makeEmbed({
+                title: toSmallCaps("✅ ᴀʟʀᴇᴀᴅʏ ʜᴇʀᴇ"),
+                description: toSmallCaps(
+                  `**${targetMember.displayName}** is already in **${invokerVC.name}** 🎧`
+                ),
+                color: EmbedColors.SUCCESS,
+                guild
+              })]
+            });
+          }
+
+          // 4b. If target is in a different VC and bot has MoveMembers → move them
+          const botMember = await guild.members.fetch(client.user.id).catch(() => null);
+          const botCanMove = botMember?.permissions?.has(PermissionFlagsBits.MoveMembers);
+          const targetIsInVC = !!targetMember.voice?.channelId;
+
+          let actionTaken = "";
+          let dmSent = false;
+
+          if (targetIsInVC && botCanMove) {
+            // Move the user directly
+            try {
+              await targetMember.voice.setChannel(invokerVC);
+              actionTaken = "moved";
+            } catch (e) {
+              console.error("[/inv] Move failed:", e?.message ?? e);
+              actionTaken = "move_failed";
+            }
+          }
+
+          // 4c. Send a DM notification regardless of move result
+          const inviteEmbed = new EmbedBuilder()
+            .setColor(EmbedColors.VC_JOIN)
+            .setAuthor({
+              name: `${interaction.user.username} invited you!`,
+              iconURL: interaction.user.displayAvatarURL({ dynamic: true })
+            })
+            .setDescription(
+              `📨 **${interaction.user.username}** is inviting you to join them in a voice channel!\n\n` +
+              `🎙️ **Server:** ${guild.name}\n` +
+              `🔊 **Voice Channel:** ${invokerVC.name}`
+            )
+            .setFooter({ text: `Jump in and join the vibes! 🎧` })
+            .setTimestamp();
+
+          try {
+            await targetUser.send({ embeds: [inviteEmbed] });
+            dmSent = true;
+          } catch (e) {
+            // DMs disabled — not an error, just note it
+            dmSent = false;
+          }
+
+          // 5. Build the final reply showing everything
+          const vcMembersList = invokerVC.members
+            .filter(m => !m.user.bot)
+            .map(m => `> 🎧 ${m.displayName}`)
+            .join("\n") || "> *(empty)*";
+
+          let resultDesc = "";
+          if (actionTaken === "moved") {
+            resultDesc = toSmallCaps(
+              `✅ **${targetMember.displayName}** has been moved to **${invokerVC.name}**!\n`
+            );
+          } else if (actionTaken === "move_failed") {
+            resultDesc = toSmallCaps(
+              `⚠️ couldn't auto-move **${targetMember.displayName}** (discord blocked it).\n`
+            );
+          } else {
+            resultDesc = toSmallCaps(
+              `📨 invite sent to **${targetMember.displayName}**!\n`
+            );
+          }
+
+          if (dmSent) {
+            resultDesc += toSmallCaps(`💌 they got a dm notification too ✅\n`);
+          } else {
+            resultDesc += toSmallCaps(`💌 dm not delivered (their dms may be closed) ⚠️\n`);
+          }
+
+          const embed = new EmbedBuilder()
+            .setColor(actionTaken === "moved" ? EmbedColors.SUCCESS : EmbedColors.VC_JOIN)
+            .setAuthor({
+              name: toSmallCaps(`📨 ɪɴᴠɪᴛᴇ — ${invokerVC.name}`),
+              iconURL: client.user.displayAvatarURL()
+            })
+            .setDescription(
+              resultDesc + "\n" +
+              toSmallCaps(`🔊 **current members in ${invokerVC.name}:**\n`) +
+              vcMembersList
+            )
+            .setThumbnail(targetUser.displayAvatarURL({ dynamic: true, size: 256 }))
+            .addFields(
+              {
+                name: toSmallCaps("👤 ɪɴᴠɪᴛᴇᴅ ᴜsᴇʀ"),
+                value: `${targetUser} (${targetMember.displayName})`,
+                inline: true
+              },
+              {
+                name: toSmallCaps("🎙️ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ"),
+                value: `${invokerVC.name}`,
+                inline: true
+              },
+              {
+                name: toSmallCaps("👥 ᴄʜᴀɴɴᴇʟ sɪᴢᴇ"),
+                value: `${invokerVC.members.filter(m => !m.user.bot).size} / ${invokerVC.userLimit > 0 ? invokerVC.userLimit : "∞"}`,
+                inline: true
+              }
+            )
+            .setFooter({ text: toSmallCaps(`invited by ${interaction.user.username} • ${guild.name}`) })
+            .setTimestamp();
+
+          return interaction.editReply({ embeds: [embed] });
         }
 
         // ------------------ SOUND-BOARD: top-level 'sound' command ------------------
