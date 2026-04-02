@@ -718,13 +718,6 @@ const commands = [
     .setName("deactivate")
     .setDescription("🛑 ᴅɪsᴀʙʟᴇ ᴀʟʟ ᴠᴄ ᴀʟᴇʀᴛs"),
   new SlashCommandBuilder()
-    .setName("setignorerole")
-    .setDescription("🙈 ɪɢɴᴏʀᴇ ᴀ ʀᴏʟᴇ ғʀᴏᴍ ᴀʟᴇʀᴛs")
-    .addRoleOption(opt => opt.setName("role").setDescription("Role to ignore").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("resetignorerole")
-    .setDescription("♻️ ʀᴇsᴇᴛ ɪɢɴᴏʀᴇ ʀᴏʟᴇ"),
-  new SlashCommandBuilder()
     .setName("ignorerole")
     .setDescription("🙈 ᴍᴀɴᴀɢᴇ ɪɢɴᴏʀᴇᴅ ʀᴏʟᴇ sᴇᴛᴛɪɴɢs")
     .addStringOption(opt => opt
@@ -796,7 +789,21 @@ const commands = [
     .setDescription("🏓 ᴄʜᴇᴄᴋ ʙᴏᴛ ʟᴀᴛᴇɴᴄʏ ᴀɴᴅ sᴛᴀᴛᴜs"),
   new SlashCommandBuilder()
     .setName("cleanup")
-    .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs")
+    .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs"),
+  new SlashCommandBuilder()
+    .setName("inv")
+    .setDescription("📨 ɪɴᴠɪᴛᴇ sᴏᴍᴇᴏɴᴇ ᴛᴏ ʏᴏᴜʀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ")
+    .addStringOption(opt => opt
+      .setName("search")
+      .setDescription("Search for a specific user by name (leave empty to see top frequent VC users)")
+      .setRequired(false)
+      .setAutocomplete(true))
+    .addIntegerOption(opt => opt
+      .setName("limit")
+      .setDescription("Number of results to show (default: 10)")
+      .setRequired(false)
+      .setMinValue(1)
+      .setMaxValue(25))
 ].map(c => c.toJSON());
 
 // ---------- Connection Health Monitoring ----------
@@ -863,15 +870,20 @@ client.once("clientReady", async () => {
 // ---------- Interaction handler ----------
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    if (!interaction.inGuild()) return;
+    // Allow /owner in DM
+    if (!interaction.inGuild() && interaction.commandName !== "owner") return;
     const guild = interaction.guild;
-    const guildId = guild.id;
+    const guildId = guild?.id;
 
-    // fetch or create cached settings for the guild
-    let settings = await getGuildSettings(guildId);
+    // fetch or create cached settings for the guild (skip for DM owner command)
+    let settings = guildId ? await getGuildSettings(guildId) : null;
 
     if (interaction.isChatInputCommand()) {
-      if (!await checkAdmin(interaction)) return;
+      // /owner, /inv, /ping, /userinfo work without guild admin check
+      const publicCommands = ["owner", "inv", "ping", "userinfo"];
+      if (!publicCommands.includes(interaction.commandName)) {
+        if (!await checkAdmin(interaction)) return;
+      }
 
       switch (interaction.commandName) {
         case "settings": {
@@ -934,23 +946,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("🔕 vc alerts powered down"), description: toSmallCaps("taking a chill break 🪷\nno join or leave pings until you power them up again with `/activate`."), color: EmbedColors.ERROR, guild })], flags: 64 });
         }
 
-        case "setignorerole": {
-          const role = interaction.options.getRole("role");
-          settings.ignoredRoleId = role.id;
-          settings.ignoreRoleEnabled = true;
-          await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("🙈 ignored role set"), description: toSmallCaps(`members with the ${role} role will now be skipped in vc alerts 🚫\nperfect for staff, bots, or background lurkers 😌`), color: EmbedColors.RESET, guild })], flags: 64 });
-        }
-
-        case "resetignorerole": {
-          settings.ignoredRoleId = null;
-          settings.ignoreRoleEnabled = false;
-          await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("👀 ignored role cleared"), description: toSmallCaps("everyone’s back on the radar 🌍\nall members will now appear in vc alerts again 💫"), color: EmbedColors.RESET, guild })], flags: 64 });
-        }
-
-
-        // ------------------ NEW: UNIFIED IGNOREROLE COMMAND ------------------
+        // ------------------ IGNOREROLE COMMAND ------------------
         case "ignorerole": {
           const action = interaction.options.getString("action");
           const role = interaction.options.getRole("role");
@@ -1192,131 +1188,153 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.editReply({ embeds: [embed] });
         }
 
-        // ------------------ NEW: OWNER COMMAND ------------------
+        // ------------------ OWNER COMMAND (DM + Guild) ------------------
         case "owner": {
-          // Check if DM or regular guild
+          const OWNER_ID = process.env.OWNER_ID;
+
+          // ── Used inside a guild ──
           if (interaction.guild) {
-            return interaction.reply({ 
-              embeds: [makeEmbed({ 
-                title: toSmallCaps("🔒 dm only command"), 
-                description: toSmallCaps("This command can only be used in DMs with the bot.\nPlease send me a direct message and try again."), 
-                color: EmbedColors.WARNING, 
-                guild 
-              })], 
-              flags: 64 
+            const notOwner = !OWNER_ID || interaction.user.id !== OWNER_ID;
+            if (notOwner) {
+              return interaction.reply({
+                embeds: [new EmbedBuilder()
+                  .setColor(EmbedColors.ERROR)
+                  .setAuthor({ name: toSmallCaps("🚫 ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"), iconURL: client.user.displayAvatarURL() })
+                  .setDescription(toSmallCaps("Only the bot owner can use this command."))
+                  .setTimestamp()
+                ],
+                flags: 64
+              });
+            }
+            // Is owner → show quick inline summary + hint to use DMs for full dashboard
+            const tg = client.guilds.cache.size;
+            const tm = client.guilds.cache.reduce((a, g) => a + g.memberCount, 0);
+            const uptimeSQ = Math.floor(process.uptime());
+            const dSQ = Math.floor(uptimeSQ / 86400), hSQ = Math.floor((uptimeSQ % 86400) / 3600), mSQ = Math.floor((uptimeSQ % 3600) / 60);
+            return interaction.reply({
+              embeds: [new EmbedBuilder()
+                .setColor(EmbedColors.WARNING)
+                .setAuthor({ name: toSmallCaps("👑 ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
+                .setDescription(
+                  toSmallCaps("💡 ᴛɪᴘ: ᴜsᴇ ᴛʜɪs ᴄᴏᴍᴍᴀɴᴅ ɪɴ ᴅᴍ ꜰᴏʀ ᴛʜᴇ ꜰᴜʟʟ ᴅᴀsʜʙᴏᴀʀᴅ ✨\n\n") +
+                  `> 🌐 **Servers:** ${tg}\n` +
+                  `> 👥 **Total Members:** ${tm.toLocaleString()}\n` +
+                  `> 📡 **WS Ping:** ${client.ws.ping}ms\n` +
+                  `> ⏱️ **Uptime:** ${dSQ}d ${hSQ}h ${mSQ}m`
+                )
+                .setFooter({ text: toSmallCaps("dm the bot to see full analytics") })
+                .setTimestamp()
+              ],
+              flags: 64
             });
           }
-          
-          // Check if user is the bot owner
-          const OWNER_ID = process.env.OWNER_ID;
+
+          // ── DM context: full owner dashboard ──
           if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
-            return interaction.reply({ 
+            return interaction.reply({
               embeds: [new EmbedBuilder()
                 .setColor(EmbedColors.ERROR)
-                .setTitle(toSmallCaps("🚫 unauthorized"))
+                .setAuthor({ name: toSmallCaps("🚫 ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"), iconURL: client.user.displayAvatarURL() })
                 .setDescription(toSmallCaps("Only the bot owner can use this command."))
                 .setTimestamp()
-              ], 
-              flags: 64 
+              ],
+              flags: 64
             });
           }
-          
+
           await interaction.deferReply({ flags: 64 });
-          
-          // Gather bot statistics
+
           const totalGuilds = client.guilds.cache.size;
-          const totalMembers = client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0);
-          
-          // Recent activity (last 24 hours)
+          const totalMembers = client.guilds.cache.reduce((acc, g) => acc + g.memberCount, 0);
           const oneDayAgo = new Date(Date.now() - (24 * 60 * 60 * 1000));
           const recentLogsCount = await GuildLog.countDocuments({ time: { $gte: oneDayAgo } }).catch(() => 0);
-          
-          // Memory usage
           const memUsage = process.memoryUsage();
           const memUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(2);
           const memTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(2);
-          
-          // Uptime
           const uptimeSecs = Math.floor(process.uptime());
           const days = Math.floor(uptimeSecs / 86400);
           const hours = Math.floor((uptimeSecs % 86400) / 3600);
           const minutes = Math.floor((uptimeSecs % 3600) / 60);
           const uptimeText = `${days}d ${hours}h ${minutes}m`;
-          
-          // WebSocket ping
           const wsPing = client.ws.ping;
-          
-          // Database stats
           const totalLogs = await GuildLog.countDocuments().catch(() => 0);
           const totalSounds = await Sound.countDocuments().catch(() => 0);
-          
-          // Top guilds by member count
-          const topGuildsByMembers = client.guilds.cache
+          const activeGuilds = await GuildSettings.countDocuments({ alertsEnabled: true }).catch(() => 0);
+          const totalSettings = await GuildSettings.countDocuments().catch(() => 0);
+          const joinCount24h = await GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type: "join" }).catch(() => 0);
+          const leaveCount24h = await GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type: "leave" }).catch(() => 0);
+          const onlineCount24h = await GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type: "online" }).catch(() => 0);
+
+          const topGuildsByMembers = [...client.guilds.cache.values()]
             .sort((a, b) => b.memberCount - a.memberCount)
-            .first(10)
-            .map((g, idx) => `${idx + 1}. **${g.name}** - ${g.memberCount} members`)
+            .slice(0, 10)
+            .map((g, idx) => `${idx + 1}. **${g.name}** — ${g.memberCount.toLocaleString()} members`)
             .join("\n");
-          
-          // Most active guilds (last 24h)
+
           const guildActivity = await GuildLog.aggregate([
             { $match: { time: { $gte: oneDayAgo } } },
             { $group: { _id: "$guildId", count: { $sum: 1 }, name: { $first: "$guildName" } } },
             { $sort: { count: -1 } },
             { $limit: 10 }
           ]).catch(() => []);
-          
+
           const topActiveGuilds = guildActivity.length > 0
-            ? guildActivity.map((g, idx) => `${idx + 1}. **${g.name}** - ${g.count} events`).join("\n")
-            : "No activity recorded";
-          
-          const embed = new EmbedBuilder()
+            ? guildActivity.map((g, idx) => `${idx + 1}. **${g.name || g._id}** — ${g.count} events`).join("\n")
+            : toSmallCaps("no activity recorded");
+
+          const ownerEmbed = new EmbedBuilder()
             .setColor(EmbedColors.INFO)
-            .setAuthor({ 
-              name: toSmallCaps("👑 bot owner dashboard"), 
-              iconURL: client.user.displayAvatarURL() 
-            })
+            .setAuthor({ name: toSmallCaps("👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
+            .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
             .setDescription(
-              toSmallCaps(
-                `**Bot:** ${client.user.username}\n` +
-                `**Status:** 🟢 Online & Running\n` +
-                `**Uptime:** ${uptimeText}\n` +
-                `**WebSocket Ping:** ${wsPing}ms`
-              )
+              `> 🤖 **Bot:** ${client.user.username}\n` +
+              `> 🟢 **Status:** Online & Running\n` +
+              `> ⏱️ **Uptime:** ${uptimeText}\n` +
+              `> 📡 **WebSocket Ping:** ${wsPing}ms`
             )
             .addFields(
               {
-                name: toSmallCaps("📊 global stats"),
-                value: 
-                  `**Total Servers:** ${totalGuilds}\n` +
-                  `**Total Members:** ${totalMembers.toLocaleString()}\n` +
-                  `**24h Activity:** ${recentLogsCount.toLocaleString()} events\n` +
-                  `**Total Logs:** ${totalLogs.toLocaleString()}\n` +
-                  `**Total Sounds:** ${totalSounds}`,
+                name: toSmallCaps("📊 ɢʟᴏʙᴀʟ sᴛᴀᴛs"),
+                value:
+                  `🌐 **Servers:** ${totalGuilds}\n` +
+                  `👥 **Total Members:** ${totalMembers.toLocaleString()}\n` +
+                  `✅ **Active Alert Guilds:** ${activeGuilds} / ${totalSettings}\n` +
+                  `🔊 **Total Sounds:** ${totalSounds}`,
+                inline: true
+              },
+              {
+                name: toSmallCaps("⚡ ʟᴀsᴛ 24ʜ ᴀᴄᴛɪᴠɪᴛʏ"),
+                value:
+                  `📈 **Total Events:** ${recentLogsCount.toLocaleString()}\n` +
+                  `🟢 **Joins:** ${joinCount24h}\n` +
+                  `🔴 **Leaves:** ${leaveCount24h}\n` +
+                  `💠 **Online:** ${onlineCount24h}`,
+                inline: true
+              },
+              {
+                name: toSmallCaps("💾 sʏsᴛᴇᴍ ʀᴇsᴏᴜʀᴄᴇs"),
+                value:
+                  `🧠 **Heap:** ${memUsedMB}MB / ${memTotalMB}MB\n` +
+                  `⚙️ **Node.js:** ${process.version}\n` +
+                  `🖥️ **Platform:** ${process.platform} ${process.arch}\n` +
+                  `📜 **Total DB Logs:** ${totalLogs.toLocaleString()}`,
                 inline: false
               },
               {
-                name: toSmallCaps("💾 system resources"),
-                value: 
-                  `**Memory Usage:** ${memUsedMB}MB / ${memTotalMB}MB\n` +
-                  `**CPU:** Node.js ${process.version}\n` +
-                  `**Platform:** ${process.platform} ${process.arch}`,
+                name: toSmallCaps("🏆 ᴛᴏᴘ 10 sᴇʀᴠᴇʀs (ʙʏ ᴍᴇᴍʙᴇʀs)"),
+                value: topGuildsByMembers || toSmallCaps("no servers"),
                 inline: false
               },
               {
-                name: toSmallCaps("🏆 top 10 servers (by members)"),
-                value: topGuildsByMembers || "No servers",
-                inline: false
-              },
-              {
-                name: toSmallCaps("⚡ most active servers (24h)"),
+                name: toSmallCaps("🔥 ᴍᴏsᴛ ᴀᴄᴛɪᴠᴇ sᴇʀᴠᴇʀs (24ʜ)"),
                 value: topActiveGuilds,
                 inline: false
               }
             )
-            .setFooter({ text: toSmallCaps("owner dashboard • all times in ist") })
+            .setFooter({ text: toSmallCaps("owner dashboard • confidential • all times in ist") })
             .setTimestamp();
-          
-          return interaction.editReply({ embeds: [embed] });
+
+          return interaction.editReply({ embeds: [ownerEmbed] });
         }
 
 
@@ -1579,6 +1597,154 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setTimestamp();
           
           return interaction.editReply({ embeds: [embed] });
+        }
+
+        // ------------------ /inv COMMAND ------------------
+        case "inv": {
+          await interaction.deferReply({ flags: 64 });
+
+          const searchQuery = interaction.options.getString("search");
+          const resultLimit = interaction.options.getInteger("limit") || 10;
+
+          // Ensure member cache is populated
+          await guild.members.fetch().catch(() => {});
+
+          const invokerMember = await guild.members.fetch(interaction.user.id).catch(() => null);
+          const invokerVC = invokerMember?.voice?.channel;
+
+          if (searchQuery && searchQuery.trim().length > 0) {
+            // ── SEARCH MODE: find members matching name who can connect to any VC ──
+            const vcChannels = guild.channels.cache.filter(c => c.type === ChannelType.GuildVoice);
+            const matchingMembers = [];
+
+            for (const [, member] of guild.members.cache) {
+              if (member.user.bot) continue;
+              const nameMatch =
+                member.user.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                (member.nickname || "").toLowerCase().includes(searchQuery.toLowerCase());
+              if (!nameMatch) continue;
+
+              const accessibleVCs = vcChannels.filter(vc => {
+                const perms = vc.permissionsFor(member);
+                return perms?.has(PermissionFlagsBits.ViewChannel) && perms?.has(PermissionFlagsBits.Connect);
+              });
+
+              if (accessibleVCs.size > 0) {
+                matchingMembers.push({ member, accessibleVCs });
+              }
+            }
+
+            if (matchingMembers.length === 0) {
+              return interaction.editReply({
+                embeds: [makeEmbed({
+                  title: toSmallCaps("🔍 ɴᴏ ʀᴇsᴜʟᴛs"),
+                  description: toSmallCaps(`No members found matching **"${searchQuery}"** with VC access.`),
+                  color: EmbedColors.WARNING,
+                  guild
+                })]
+              });
+            }
+
+            const resultsList = matchingMembers.slice(0, resultLimit).map((entry, idx) => {
+              const { member, accessibleVCs } = entry;
+              const inVC = member.voice?.channel
+                ? `🎧 \`${member.voice.channel.name}\``
+                : toSmallCaps("not in vc");
+              const vcList = accessibleVCs.size <= 3
+                ? [...accessibleVCs.values()].map(v => `\`${v.name}\``).join(", ")
+                : `${[...accessibleVCs.values()].slice(0, 3).map(v => `\`${v.name}\``).join(", ")} +${accessibleVCs.size - 3} more`;
+              return `\`${idx + 1}.\` ${member} — ${inVC}\n> 📌 ${toSmallCaps("vc access:")} ${vcList}`;
+            }).join("\n\n");
+
+            const searchEmbed = new EmbedBuilder()
+              .setColor(EmbedColors.INFO)
+              .setAuthor({ name: toSmallCaps("🔍 ᴠᴄ ᴀᴄᴄᴇss sᴇᴀʀᴄʜ"), iconURL: client.user.displayAvatarURL() })
+              .setDescription(`${toSmallCaps(`Results for "${searchQuery}":`)}
+
+${resultsList}`)
+              .setFooter({ text: toSmallCaps(`showing ${Math.min(matchingMembers.length, resultLimit)} of ${matchingMembers.length} result${matchingMembers.length !== 1 ? "s" : ""} • ${guild.name}`) })
+              .setTimestamp();
+
+            return interaction.editReply({ embeds: [searchEmbed] });
+          }
+
+          // ── DEFAULT MODE: top frequent VC users from logs ──
+          const freqResults = await GuildLog.aggregate([
+            { $match: { guildId: guild.id, type: "join" } },
+            { $group: { _id: "$user", joinCount: { $sum: 1 } } },
+            { $sort: { joinCount: -1 } },
+            { $limit: resultLimit * 2 }
+          ]).catch(() => []);
+
+          const inviteList = [];
+          for (const entry of freqResults) {
+            if (inviteList.length >= resultLimit) break;
+            const member = guild.members.cache.find(m =>
+              m.user.tag === entry._id ||
+              m.user.username === entry._id ||
+              m.user.tag.split("#")[0] === entry._id
+            );
+            if (!member || member.user.bot) continue;
+
+            const inVC = member.voice?.channel
+              ? `🎧 \`${member.voice.channel.name}\``
+              : toSmallCaps("not in vc");
+            const status = member.presence?.status || "offline";
+            const statusEmoji = status === "online" ? "🟢" : status === "idle" ? "🟡" : status === "dnd" ? "🔴" : "⚫";
+            inviteList.push({ member, inVC, statusEmoji, joinCount: entry.joinCount });
+          }
+
+          // Fallback: sort by server join date if no log data yet
+          if (inviteList.length === 0) {
+            const fallback = [...guild.members.cache.values()]
+              .filter(m => !m.user.bot)
+              .sort((a, b) => (a.joinedTimestamp || 0) - (b.joinedTimestamp || 0))
+              .slice(0, resultLimit);
+
+            for (const member of fallback) {
+              const inVC = member.voice?.channel
+                ? `🎧 \`${member.voice.channel.name}\``
+                : toSmallCaps("not in vc");
+              const status = member.presence?.status || "offline";
+              const statusEmoji = status === "online" ? "🟢" : status === "idle" ? "🟡" : status === "dnd" ? "🔴" : "⚫";
+              inviteList.push({ member, inVC, statusEmoji, joinCount: null });
+            }
+          }
+
+          if (inviteList.length === 0) {
+            return interaction.editReply({
+              embeds: [makeEmbed({
+                title: toSmallCaps("📭 ɴᴏ ᴍᴇᴍʙᴇʀs ꜰᴏᴜɴᴅ"),
+                description: toSmallCaps("No members found. Try using the `search` option."),
+                color: EmbedColors.WARNING,
+                guild
+              })]
+            });
+          }
+
+          const listText = inviteList.map((entry, idx) => {
+            const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `\`${idx + 1}.\``;
+            const countText = entry.joinCount !== null
+              ? `${toSmallCaps("vc joins:")} **${entry.joinCount}**`
+              : toSmallCaps("server member");
+            return `${medal} ${entry.member} ${entry.statusEmoji}\n> ${entry.inVC} • ${countText}`;
+          }).join("\n\n");
+
+          const vcInfo = invokerVC
+            ? `${toSmallCaps("📍 your vc:")} **${invokerVC.name}** (${invokerVC.members.size} member${invokerVC.members.size !== 1 ? "s" : ""})`
+            : toSmallCaps("💡 join a vc first, then invite someone!");
+
+          const invEmbed = new EmbedBuilder()
+            .setColor(EmbedColors.VC_JOIN)
+            .setAuthor({ name: toSmallCaps("📨 ɪɴᴠɪᴛᴇ ᴛᴏ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
+            .setDescription(
+              `${vcInfo}\n\n` +
+              `${toSmallCaps(`🎙️ ᴛᴏᴘ ${inviteList.length} ꜰʀᴇǫᴜᴇɴᴛ ᴠᴄ ᴜsᴇʀs:`)}\n\n${listText}`
+            )
+            .setFooter({ text: toSmallCaps(`tip: use /inv search:<name> to find specific users • ${guild.name}`) })
+            .setTimestamp();
+
+          return interaction.editReply({ embeds: [invEmbed] });
         }
 
         // ------------------ NEW: CLEANUP COMMAND ------------------
@@ -1902,6 +2068,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isAutocomplete()) {
+      // /inv autocomplete
+      if (interaction.commandName === "inv") {
+        const focused = (interaction.options.getFocused() || "").toString().toLowerCase();
+        await guild.members.fetch().catch(() => {});
+        const members = [...guild.members.cache.values()]
+          .filter(m => !m.user.bot && (
+            m.user.username.toLowerCase().includes(focused) ||
+            (m.nickname || "").toLowerCase().includes(focused)
+          ))
+          .slice(0, 25);
+        const choices = members.map(m => ({
+          name: `${m.displayName} (@${m.user.username})`,
+          value: m.user.username
+        }));
+        return interaction.respond(choices.length > 0 ? choices : [{ name: toSmallCaps("ɴᴏ ʀᴇsᴜʟᴛs"), value: focused || "" }]);
+      }
+
       if (interaction.commandName !== "sound") return;
       const sub = interaction.options.getSubcommand();
       const focused = (interaction.options.getFocused() || "").toString().toLowerCase();
