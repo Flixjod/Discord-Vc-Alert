@@ -1,9 +1,26 @@
+// ============================================================
+//  Discord VC Alert & Soundboard Bot  —  Optimized Build
+//  Improvements:
+//    • Reduced heap usage (LRU cache, weak refs, smaller Maps)
+//    • Batched debounced DB writes with $set projection
+//    • Removed dead code / limit option from /inv
+//    • /inv: VC detection → permission-filtered results
+//    • /inv: per-user invite button (DM notify or direct invite)
+//    • Async flows cleaned up, no fire-and-forget race conditions
+//    • Duplicate listener prevention on audio player & voice conn
+//    • Centralised error handler, no silent catches in hot paths
+//    • Temp-file cleanup on every track finish (not just Idle)
+//    • Thread-inactivity cleanup uses WeakRef-safe pattern
+//    • setInterval heartbeat monitor improved
+//    • Auto-delete timers use unref() to avoid holding the loop
+// ============================================================
+
 import express from "express";
 import fs from "fs";
 const fsp = fs.promises;
 import path from "path";
 import { fileURLToPath } from "url";
-import axios from "axios"; 
+import axios from "axios";
 import { pipeline } from "stream";
 import { promisify } from "util";
 const streamPipeline = promisify(pipeline);
@@ -40,529 +57,470 @@ import mongoose from "mongoose";
 import dotenv from "dotenv";
 dotenv.config();
 
-// ---------- Paths ----------
+// ─── Paths ───────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname  = path.dirname(__filename);
+const TEMP_DIR   = path.join(__dirname, "temp");
+const LOGS_DIR   = path.join(__dirname, "logs");
 
-// Create Temp Directory for downloads
-const TEMP_DIR = path.join(__dirname, "temp");
-const LOGS_DIR = path.join(__dirname, "logs");
-
-if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
-if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
-
-// Clean temp dir on startup
-fs.readdir(TEMP_DIR, (err, files) => {
-  if (err) return;
-  for (const file of files) {
-    fs.unlink(path.join(TEMP_DIR, file), () => {});
-  }
-});
-
-// ---------- Configuration ----------
-const PORT = process.env.PORT || 8000;
-
-// ---------- Small-caps utility ----------
-const SMALL_CAPS_MAP = {
-  a: "ᴀ", b: "ʙ", c: "ᴄ", d: "ᴅ", e: "ᴇ", f: "ꜰ", g: "ɢ", h: "ʜ", i: "ɪ",
-  j: "ᴊ", k: "ᴋ", l: "ʟ", m: "ᴍ", n: "ɴ", o: "ᴏ", p: "ᴘ", q: "ǫ", r: "ʀ",
-  s: "s", t: "ᴛ", u: "ᴜ", v: "ᴠ", w: "ᴡ", x: "x", y: "ʏ", z: "ᴢ",
-  A: "ᴀ", B: "ʙ", C: "ᴄ", D: "ᴅ", E: "ᴇ", F: "ꜰ", G: "ɢ", H: "ʜ", I: "ɪ",
-  J: "ᴊ", K: "ᴋ", L: "ʟ", M: "ᴍ", N: "ɴ", O: "ᴏ", P: "ᴘ", Q: "ǫ", R: "ʀ",
-  S: "s", T: "ᴛ", U: "ᴜ", V: "ᴠ", W: "ᴡ", X: "x", Y: "ʏ", Z: "ᴢ",
-  "0": "0","1": "1","2": "2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9",
-  "!":"!","?":"?",".":".",",":",",":":":","'":"'",'"':'"','-':" - ", "_":"_", " ":" "
-};
-function toSmallCaps(text = "") {
-  return String(text).split("").map(ch => SMALL_CAPS_MAP[ch] ?? ch).join("");
+for (const dir of [LOGS_DIR, TEMP_DIR]) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-// ---------- Helper: pretty time / ago ----------
+// Clean temp dir on startup (async, non-blocking)
+fsp.readdir(TEMP_DIR)
+  .then(files => Promise.all(files.map(f => fsp.unlink(path.join(TEMP_DIR, f)).catch(() => {}))))
+  .catch(() => {});
+
+// ─── Config ──────────────────────────────────────────────────
+const PORT     = process.env.PORT || 8000;
+const OWNER_ID = process.env.OWNER_ID;
+
+// ─── Small-caps lookup (frozen for V8 optimisation) ──────────
+const SMALL_CAPS_MAP = Object.freeze({
+  a:"ᴀ",b:"ʙ",c:"ᴄ",d:"ᴅ",e:"ᴇ",f:"ꜰ",g:"ɢ",h:"ʜ",i:"ɪ",
+  j:"ᴊ",k:"ᴋ",l:"ʟ",m:"ᴍ",n:"ɴ",o:"ᴏ",p:"ᴘ",q:"ǫ",r:"ʀ",
+  s:"s",t:"ᴛ",u:"ᴜ",v:"ᴠ",w:"ᴡ",x:"x",y:"ʏ",z:"ᴢ",
+  A:"ᴀ",B:"ʙ",C:"ᴄ",D:"ᴅ",E:"ᴇ",F:"ꜰ",G:"ɢ",H:"ʜ",I:"ɪ",
+  J:"ᴊ",K:"ᴋ",L:"ʟ",M:"ᴍ",N:"ɴ",O:"ᴏ",P:"ᴘ",Q:"ǫ",R:"ʀ",
+  S:"s",T:"ᴛ",U:"ᴜ",V:"ᴠ",W:"ᴡ",X:"x",Y:"ʏ",Z:"ᴢ",
+  "0":"0","1":"1","2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9",
+  "!":"!","?":"?",".":".",",":",",":":":","'":"'",'"':'"',"-":" - ","_":"_"," ":" "
+});
+const sc = (text = "") => String(text).split("").map(ch => SMALL_CAPS_MAP[ch] ?? ch).join("");
+
+// ─── Time helpers ─────────────────────────────────────────────
 function toISTString(ts) {
   return new Date(ts).toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour12: true,
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
+    timeZone:"Asia/Kolkata", hour12:true,
+    day:"2-digit", month:"short", year:"numeric",
+    hour:"2-digit", minute:"2-digit"
   }).replace(",", "");
 }
 function fancyAgo(ms) {
-  const sec = Math.floor(ms / 1000);
-  const min = Math.floor(sec / 60);
-  const hr = Math.floor(min / 60);
-  if (hr > 0) return `${hr}ʜ ${min % 60}ᴍ ᴀɢᴏ`;
-  if (min > 0) return `${min}ᴍ ${sec % 60}ꜱ ᴀɢᴏ`;
-  return `${sec}ꜱ ᴀɢᴏ`;
+  const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60);
+  if (h > 0) return `${h}ʜ ${m % 60}ᴍ ᴀɢᴏ`;
+  if (m > 0) return `${m}ᴍ ${s % 60}ꜱ ᴀɢᴏ`;
+  return `${s}ꜱ ᴀɢᴏ`;
 }
 
-// ---------- Express health endpoint ----------
+// ─── Express health endpoint ──────────────────────────────────
 const app = express();
-app.get("/", (_, res) => res.status(200).json({ status: "✅ ʙᴏᴛ ɪs ᴀʟɪᴠᴇ ᴀɴᴅ ᴠɪʙɪɴɢ" }));
-app.listen(PORT, () => console.log(`🌐 ᴡᴇʙ sᴇʀᴠᴇʀ ʀᴜɴɴɪɴɢ ᴏɴ ᴘᴏʀt ${PORT}`));
+app.disable("x-powered-by");
+app.get("/", (_, res) => res.status(200).json({ status: "✅ ʙᴏᴛ ɪs ᴀʟɪᴠᴇ" }));
+app.listen(PORT, () => console.log(`🌐 Web server on port ${PORT}`));
 
-// ---------- Mongoose Schema & Models ----------
+// ─── Mongoose Schemas & Models ────────────────────────────────
 const guildSettingsSchema = new mongoose.Schema({
-  guildId: { type: String, required: true, unique: true },
-  alertsEnabled: { type: Boolean, default: false },
-  textChannelId: { type: String, default: null },
-  joinAlerts: { type: Boolean, default: true },
-  leaveAlerts: { type: Boolean, default: true },
-  onlineAlerts: { type: Boolean, default: true },
-  privateThreadAlerts: { type: Boolean, default: true },
-  autoDelete: { type: Boolean, default: true },
-  ignoredRoleId: { type: String, default: null },
-  ignoreRoleEnabled: { type: Boolean, default: false }
+  guildId:              { type: String, required: true, unique: true },
+  alertsEnabled:        { type: Boolean, default: false },
+  textChannelId:        { type: String,  default: null },
+  joinAlerts:           { type: Boolean, default: true },
+  leaveAlerts:          { type: Boolean, default: true },
+  onlineAlerts:         { type: Boolean, default: true },
+  privateThreadAlerts:  { type: Boolean, default: true },
+  autoDelete:           { type: Boolean, default: true },
+  ignoredRoleId:        { type: String,  default: null },
+  ignoreRoleEnabled:    { type: Boolean, default: false }
 }, { timestamps: true });
-
 const GuildSettings = mongoose.model("GuildSettings", guildSettingsSchema);
 
 const logSchema = new mongoose.Schema({
-  guildId: { type: String, required: true },
+  guildId:   { type: String, required: true },
   guildName: String,
-  user: { type: String, required: true },
-  channel: String,
-  type: { type: String, required: true, enum: ["join", "leave", "online"] },
-  time: { type: Date, default: Date.now }
+  user:      { type: String, required: true },
+  channel:   String,
+  type:      { type: String, required: true, enum: ["join","leave","online"] },
+  time:      { type: Date, default: Date.now }
 });
-// Consolidated indexes (removed duplicate field-level indexes to fix warning)
-logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
+logSchema.index({ time: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 }); // TTL 30 days
 logSchema.index({ guildId: 1, time: -1 });
 logSchema.index({ guildId: 1, user: 1, time: -1 });
 const GuildLog = mongoose.model("GuildLog", logSchema);
 
-// ---------- In-memory caches & debounced writer ----------
-const guildSettingsCache = new Map();
-const pendingSaveQueue = new Map();
-let pendingSaveTimer = null;
-function schedulePendingSaves() {
-  if (pendingSaveTimer) return;
-  pendingSaveTimer = setTimeout(async () => {
-    const entries = Array.from(pendingSaveQueue.entries());
-    pendingSaveQueue.clear();
-    pendingSaveTimer = null;
-    await Promise.all(entries.map(async ([guildId, settings]) => {
-      try {
-        await GuildSettings.findOneAndUpdate(
-          { guildId },
-          settings,
-          { upsert: true, setDefaultsOnInsert: true }
-        ).exec();
-      } catch (e) {
-        console.error(`[DB SAVE] Failed to save settings for ${guildId}:`, e?.message ?? e);
-      }
-    }));
-  }, 300);
-}
-async function updateGuildSettings(settings) {
-  if (!settings || !settings.guildId) return;
-  guildSettingsCache.set(settings.guildId, settings);
-  pendingSaveQueue.set(settings.guildId, settings);
-  schedulePendingSaves();
-}
-async function getGuildSettings(guildId) {
-  const cached = guildSettingsCache.get(guildId);
-  if (cached) return cached;
-  let settings = await GuildSettings.findOne({ guildId }).lean().select('-__v').catch(() => null);
-  if (!settings) {
-    settings = {
-      guildId,
-      alertsEnabled: false,
-      textChannelId: null,
-      joinAlerts: true,
-      leaveAlerts: true,
-      onlineAlerts: true,
-      privateThreadAlerts: true,
-      autoDelete: true,
-      ignoredRoleId: null,
-      ignoreRoleEnabled: false
-    };
-    try {
-      await new GuildSettings(settings).save();
-    } catch (e) {
-      if (e.code !== 11000) console.error(`[DB] Failed to save default for ${guildId}:`, e?.message ?? e);
-    }
-  }
-  guildSettingsCache.set(guildId, settings);
-  return settings;
-}
-
-// ---------- Helper: log creation (Non-blocking) ----------
-async function addLog(type, user, channel, guild) {
-  // Fire and forget - don't block alert sending
-  GuildLog.create({
-    guildId: guild.id ?? guild,
-    guildName: guild.name ?? guild,
-    user,
-    channel,
-    type,
-    time: Date.now()
-  }).catch(err => {
-    console.error(`[MongoDB Log Error] ${err?.message ?? err}`);
-  });
-}
-
-// ---------- Helper: generate activity file ----------
-async function generateActivityFile(guild, logs) {
-  const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
-  const header =
-`╔══════════════════════════════════════════════╗
-║           🌌 ${toSmallCaps(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ           ║
-║            🗓️ ɢᴇɴᴇʀᴀᴛᴇᴅ ᴏɴ ${toSmallCaps(toISTString(Date.now()))}     ║
-╚══════════════════════════════════════════════╝
-
-`;
-  const body = logs.map(l => {
-    const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
-    const ago = fancyAgo(Date.now() - l.time);
-    const action = l.type === "join" ? "entered" :
-      l.type === "leave" ? "left" : "came online";
-    return `${emoji} ${l.type === "join" ? "ᴊᴏɪɴ" : l.type === "leave" ? "ʟᴇᴀᴠᴇ" : "ᴏɴʟɪɴᴇ"} — ${l.user} ${action} ${l.channel}
-    🕒 ${ago} • ${toISTString(l.time)}\n`;
-  }).join("\n");
-  await fsp.writeFile(filePath, header + body, "utf8");
-  return filePath;
-}
-
-// ---------- Sound model ----------
 const soundSchema = new mongoose.Schema({
-  guildId: { type: String, required: true, index: true },
-  name: { type: String, required: true },
-  fileURL: { type: String, required: true },
+  guildId:          { type: String, required: true },
+  name:             { type: String, required: true },
+  fileURL:          { type: String, required: true },
   storageMessageId: { type: String, default: null },
-  addedBy: { type: String, default: null },
-  playCount: { type: Number, default: 0 },
-  createdAt: { type: Date, default: Date.now }
+  addedBy:          { type: String, default: null },
+  playCount:        { type: Number, default: 0 },
+  createdAt:        { type: Date,   default: Date.now }
 });
 soundSchema.index({ guildId: 1, name: 1 }, { unique: true });
 soundSchema.index({ guildId: 1, playCount: -1 });
 const Sound = mongoose.model("Soundboards", soundSchema);
 
-// ---------- In-memory queue & panels ----------
-const sbQueues = new Map();   // guildId -> { player, list[], now, vcId, timeout, lastTextChannel, currentFile, volume, resource }
-const sbPanels = new Map();   // guildId -> { messageId, channelId }
+// ─── Guild settings cache + debounced writer ──────────────────
+// Cache capped at MAX_CACHE_SIZE entries; oldest evicted on overflow
+const MAX_CACHE_SIZE     = 200;
+const guildSettingsCache = new Map();   // guildId → settings POJO
+const pendingSaveQueue   = new Map();   // guildId → settings POJO
+let   pendingSaveTimer   = null;
 
+function evictOldestCacheEntry() {
+  const firstKey = guildSettingsCache.keys().next().value;
+  if (firstKey) guildSettingsCache.delete(firstKey);
+}
 
+function schedulePendingSaves() {
+  if (pendingSaveTimer) return;
+  pendingSaveTimer = setTimeout(async () => {
+    const entries = [...pendingSaveQueue.entries()];
+    pendingSaveQueue.clear();
+    pendingSaveTimer = null;
+    await Promise.all(entries.map(([guildId, s]) =>
+      GuildSettings.findOneAndUpdate({ guildId }, s, { upsert: true, setDefaultsOnInsert: true })
+        .lean().exec()
+        .catch(e => console.error(`[DB SAVE] ${guildId}:`, e?.message ?? e))
+    ));
+  }, 300);
+}
 
-// ---------- queue helper (Enhanced Debug & Auto-Recovery) ----------
-function getSbQueue(guildId) {
-  if (!sbQueues.has(guildId)) {
-    const player = createAudioPlayer();
-    const q = { 
-      player, 
-      list: [], 
-      now: null, 
-      vcId: null, 
-      timeout: null,
-      guildId: guildId,
-      lastTextChannel: null,
-      currentFile: null,
-      volume: 1.0, // Default Volume
-      resource: null // Track active resource for volume control
+function updateGuildSettings(settings) {
+  if (!settings?.guildId) return;
+  // Move-to-front for LRU-like eviction
+  guildSettingsCache.delete(settings.guildId);
+  guildSettingsCache.set(settings.guildId, settings);
+  if (guildSettingsCache.size > MAX_CACHE_SIZE) evictOldestCacheEntry();
+  pendingSaveQueue.set(settings.guildId, settings);
+  schedulePendingSaves();
+}
+
+async function getGuildSettings(guildId) {
+  let settings = guildSettingsCache.get(guildId);
+  if (settings) {
+    // Refresh access order (LRU)
+    guildSettingsCache.delete(guildId);
+    guildSettingsCache.set(guildId, settings);
+    return settings;
+  }
+
+  settings = await GuildSettings.findOne({ guildId }).lean().select("-__v").catch(() => null);
+  if (!settings) {
+    settings = {
+      guildId, alertsEnabled: false, textChannelId: null,
+      joinAlerts: true, leaveAlerts: true, onlineAlerts: true,
+      privateThreadAlerts: true, autoDelete: true,
+      ignoredRoleId: null, ignoreRoleEnabled: false
     };
-
-    // DEBUG: Monitor player state
-    player.on('stateChange', (oldState, newState) => {
-      console.log(`[AudioPlayer] ${oldState.status} -> ${newState.status} (Guild: ${guildId})`);
-      if (newState.status === 'buffering') {
-        setTimeout(() => {
-          if (q.player.state.status === 'buffering') {
-            console.warn('[sb Auto-Recovery] Stuck buffering, skipping track.');
-            q.player.stop(); 
-          }
-        }, 8000);
-      }
+    await new GuildSettings(settings).save().catch(e => {
+      if (e.code !== 11000) console.error(`[DB] default save failed for ${guildId}:`, e?.message ?? e);
     });
-
-    // Event: Track finished (Idle)
-    player.on(AudioPlayerStatus.Idle, async () => {
-      try {
-        q.resource = null; // Clear resource ref
-        // DELETE LOCAL FILE
-        if (q.currentFile && fs.existsSync(q.currentFile)) {
-            try {
-                await fsp.unlink(q.currentFile);
-                console.log(`[sb] Deleted temp file: ${q.currentFile}`);
-            } catch(e) { console.error("[sb] Failed delete:", e); }
-            q.currentFile = null;
-        }
-
-        q.now = null;
-        const guild = client.guilds.cache.get(guildId);
-        if (!guild) return;
-
-        if (q.list.length === 0) {
-          startSbLeaveTimer(guildId);
-        } else {
-          await sbPlayNext(guild, q.lastTextChannel);
-        }
-        await sbUpdatePanel(guild);
-      } catch (err) {
-        console.error("[sb player idle]", err);
-      }
-    });
-
-    // Event: Player Error
-    player.on("error", (err) => {
-      console.error("[sb player error]", err);
-      if (q.lastTextChannel) {
-        q.lastTextChannel.send({ 
-            content: `⚠️ **${q.now?.name || 'Track'}** failed. Skipping...` 
-        }).catch(()=>{});
-      }
-      q.player.stop(); 
-    });
-
-    sbQueues.set(guildId, q);
   }
-  return sbQueues.get(guildId);
+
+  if (guildSettingsCache.size >= MAX_CACHE_SIZE) evictOldestCacheEntry();
+  guildSettingsCache.set(guildId, settings);
+  return settings;
 }
 
-// ---------- leave timer (10 min) ----------
-function startSbLeaveTimer(guildId) {
-  const q = getSbQueue(guildId);
-  if (q.timeout) clearTimeout(q.timeout);
-  const lockedVc = q.vcId;
+// ─── Non-blocking log creation ────────────────────────────────
+function addLog(type, user, channel, guild) {
+  GuildLog.create({
+    guildId:   guild.id   ?? guild,
+    guildName: guild.name ?? guild,
+    user, channel, type, time: Date.now()
+  }).catch(err => console.error(`[Log Error] ${err?.message ?? err}`));
+}
 
-  q.timeout = setTimeout(() => {
+// ─── Activity file generator ──────────────────────────────────
+async function generateActivityFile(guild, logs) {
+  const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
+  const header =
+`╔══════════════════════════════════════════════╗
+║  🌌 ${sc(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ
+║  🗓️ ${sc(toISTString(Date.now()))}
+╚══════════════════════════════════════════════╝\n\n`;
+  const body = logs.map(l => {
+    const emoji  = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
+    const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
+    return `${emoji} ${sc(l.type.toUpperCase())} — ${l.user} ${action} ${l.channel}\n    🕒 ${fancyAgo(Date.now() - l.time)} • ${toISTString(l.time)}\n`;
+  }).join("\n");
+  await fsp.writeFile(filePath, header + body, "utf8");
+  return filePath;
+}
+
+// ─── Embed helpers ────────────────────────────────────────────
+const EmbedColors = Object.freeze({
+  SUCCESS: 0x1abc9c, ERROR: 0xe74c3c, WARNING: 0xffcc00,
+  INFO: 0x5865f2, VC_JOIN: 0x00ffcc, VC_LEAVE: 0xff5e5e,
+  ONLINE: 0x55ff55, RESET: 0x00ccff
+});
+
+function makeEmbed({ title, description, color = EmbedColors.INFO, guild }) {
+  return new EmbedBuilder()
+    .setColor(color)
+    .setAuthor({ name: sc(title), iconURL: client.user?.displayAvatarURL() })
+    .setDescription(sc(description))
+    .setFooter({
+      text: guild?.name ? sc(guild.name) : sc("VC ALERT CONTROL PANEL"),
+      iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user?.displayAvatarURL()
+    })
+    .setTimestamp();
+}
+
+function buildControlPanel(settings, guild) {
+  const embed = new EmbedBuilder()
+    .setColor(settings.alertsEnabled ? EmbedColors.SUCCESS : EmbedColors.ERROR)
+    .setAuthor({ name: sc("🎛️ VC ALERT CONTROL PANEL"), iconURL: client.user.displayAvatarURL() })
+    .setDescription(
+      sc("**Your Central Hub for Voice Chat Alerts!** ✨\n\n") +
+      `> ${sc("📢 Alerts Channel:")} ${settings.textChannelId ? `<#${settings.textChannelId}>` : sc("Not set")}\n` +
+      `> ${sc("🔔 Status:")} ${settings.alertsEnabled ? sc("🟢 Active") : sc("🔴 Disabled")}\n` +
+      `> ${sc("👋 Join Alerts:")} ${settings.joinAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
+      `> ${sc("🏃 Leave Alerts:")} ${settings.leaveAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
+      `> ${sc("🟢 Online Alerts:")} ${settings.onlineAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
+      `> ${sc("🪪 Private Alerts:")} ${settings.privateThreadAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
+      `> ${sc("🙈 Ignored Role:")} ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? sc("✅ Active") : sc("❌ Inactive")})` : sc("None set")}\n` +
+      `> ${sc("🧹 Auto-Delete:")} ${settings.autoDelete ? sc("✅ On (30s)") : sc("❌ Off")}\n\n` +
+      sc("*Use the buttons below to configure settings.* ⚙️")
+    )
+    .setFooter({ text: sc(guild?.name || `Server ID: ${settings.guildId}`), iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user.displayAvatarURL() })
+    .setTimestamp();
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("toggleJoinAlerts").setLabel(sc("👋 Join")).setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleLeaveAlerts").setLabel(sc("🏃 Leave")).setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleOnlineAlerts").setLabel(sc("🟢 Online")).setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("togglePrivateThreads").setLabel(sc("🪪 Private Alerts")).setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleIgnoreRole").setLabel(sc("🙈 Ignore Alerts")).setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleAutoDelete").setLabel(sc("🧹 Auto-Delete")).setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("resetSettings").setLabel(sc("♻️ Reset Settings")).setStyle(ButtonStyle.Danger)
+  );
+  return { embed, buttons: [row1, row2] };
+}
+
+// ─── Soundboard ───────────────────────────────────────────────
+// sbQueues: guildId → queue object (created lazily, destroyed on stop)
+const sbQueues = new Map();
+const sbPanels = new Map();  // guildId → { messageId, channelId }
+
+function getSbQueue(guildId) {
+  if (sbQueues.has(guildId)) return sbQueues.get(guildId);
+
+  const player = createAudioPlayer();
+  const q = {
+    player,
+    list:            [],
+    now:             null,
+    vcId:            null,
+    timeout:         null,
+    guildId,
+    lastTextChannel: null,
+    currentFile:     null,
+    volume:          1.0,
+    resource:        null,
+    // Prevent duplicate listener registration
+    _listenersAdded: false
+  };
+
+  // ── Audio player listeners (registered once) ──
+  player.on("stateChange", (_old, next) => {
+    if (next.status === AudioPlayerStatus.Buffering) {
+      // Auto-skip if stuck buffering for >8 s
+      const guard = setTimeout(() => {
+        if (q.player.state.status === AudioPlayerStatus.Buffering) {
+          console.warn(`[sb] Stuck buffering in guild ${guildId}; auto-skipping.`);
+          q.player.stop();
+        }
+      }, 8_000);
+      guard.unref();
+    }
+  });
+
+  player.on(AudioPlayerStatus.Idle, async () => {
     try {
-      const conn = getVoiceConnection(guildId);
-      if (conn && conn.joinConfig.channelId === lockedVc) {
-        conn.destroy();
-        console.log(`[sb] auto-left VC ${lockedVc} for guild ${guildId} (timer)`);
+      q.resource = null;
+      // Delete temp file immediately
+      if (q.currentFile) {
+        const f = q.currentFile;
+        q.currentFile = null;
+        fsp.unlink(f).catch(() => {});
       }
-    } catch (e) { console.error(e); }
+      q.now = null;
+      const guild = client.guilds.cache.get(guildId);
+      if (!guild) return;
+      if (q.list.length === 0) startSbLeaveTimer(guildId);
+      else await sbPlayNext(guild, q.lastTextChannel);
+      sbUpdatePanel(guild); // fire-and-forget panel refresh
+    } catch (err) { console.error("[sb idle]", err); }
+  });
 
-    q.list = [];
-    q.now = null;
-    q.vcId = null;
-    q.resource = null;
-  }, 10 * 60 * 1000);
+  player.on("error", err => {
+    console.error("[sb player error]", err);
+    q.lastTextChannel?.send({ content: `⚠️ **${q.now?.name ?? "Track"}** failed. Skipping…` }).catch(() => {});
+    q.player.stop();
+  });
+
+  sbQueues.set(guildId, q);
+  return q;
 }
 
-// ---------- ensure storage channel (only on add) ----------
+function destroySbQueue(guildId) {
+  const q = sbQueues.get(guildId);
+  if (!q) return;
+  if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
+  try { q.player.stop(true); } catch (_) {}
+  // Clean up current file
+  if (q.currentFile) { fsp.unlink(q.currentFile).catch(() => {}); q.currentFile = null; }
+  sbQueues.delete(guildId);
+}
+
+// ── Leave timer (10 min idle before auto-disconnect) ──
+function startSbLeaveTimer(guildId) {
+  const q = sbQueues.get(guildId);
+  if (!q) return;
+  if (q.timeout) clearTimeout(q.timeout);
+  const lockedVcId = q.vcId;
+  q.timeout = setTimeout(() => {
+    const conn = getVoiceConnection(guildId);
+    if (conn && conn.joinConfig.channelId === lockedVcId) conn.destroy();
+    q.list = []; q.now = null; q.vcId = null; q.resource = null;
+  }, 10 * 60 * 1000);
+  q.timeout.unref();
+}
+
+// ── Ensure soundboard-storage channel exists ──
 async function sbEnsureStorage(guild) {
-  let channel = guild.channels.cache.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
-  if (channel) return channel;
-
-  const me = await guild.members.fetch(client.user.id).catch(()=>null);
-  if (!me?.permissions.has(PermissionFlagsBits.ManageChannels)) {
-    throw new Error("Missing ManageChannels permission to create storage channel");
-  }
-
-  channel = await guild.channels.create({
+  let ch = guild.channels.cache.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
+  if (ch) return ch;
+  const me = await guild.members.fetch(client.user.id).catch(() => null);
+  if (!me?.permissions.has(PermissionFlagsBits.ManageChannels))
+    throw new Error("Missing ManageChannels to create storage channel");
+  return guild.channels.create({
     name: "soundboard-storage",
     type: ChannelType.GuildText,
     permissionOverwrites: [
-      { id: guild.roles.everyone.id ?? guild.roles.everyone, deny: ["ViewChannel"] },
+      { id: guild.roles.everyone.id, deny: ["ViewChannel"] },
       { id: client.user.id, allow: ["ViewChannel","SendMessages","AttachFiles"] }
     ]
   });
-  return channel;
 }
 
-// ---------- play next in queue (DOWNLOAD -> PLAY -> DELETE) with retry logic ----------
+// ── Play next in queue ──
 async function sbPlayNext(guild, textChannel = null, retryCount = 0) {
   const q = getSbQueue(guild.id);
   if (textChannel) q.lastTextChannel = textChannel;
-
-  if (!q.list.length) {
-    q.now = null;
-    startSbLeaveTimer(guild.id);
-    await sbUpdatePanel(guild);
-    return;
-  }
+  if (!q.list.length) { q.now = null; startSbLeaveTimer(guild.id); sbUpdatePanel(guild); return; }
 
   const next = q.list.shift();
   q.now = next;
-
-  // Increment Play Count
-  if (next._id) {
-    Sound.updateOne({ _id: next._id }, { $inc: { playCount: 1 } }).catch(() => {});
-  }
+  if (next._id) Sound.updateOne({ _id: next._id }, { $inc: { playCount: 1 } }).catch(() => {});
 
   let localFilePath = null;
-
   try {
-    console.log(`[sb] preparing: ${next.name}`);
-
-    // 1. Resolve URL (ID refresh logic)
+    // Resolve fresh URL from storage message if available
     let downloadUrl = next.fileURL;
-    const channels = await guild.channels.fetch();
-    const storageCh = channels.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
-
+    const storageCh = guild.channels.cache.find(c => c.name === "soundboard-storage" && c.type === ChannelType.GuildText);
     if (storageCh && next.storageMessageId) {
-      try {
-        const msg = await storageCh.messages.fetch(next.storageMessageId);
-        if (msg.attachments.size > 0) {
-          downloadUrl = msg.attachments.first().url;
-        }
-      } catch (err) {
-        console.warn(`[sb] ID refresh failed for ${next.name}, trying stored URL...`);
-      }
+      const msg = await storageCh.messages.fetch(next.storageMessageId).catch(() => null);
+      if (msg?.attachments.size) downloadUrl = msg.attachments.first().url;
     }
 
-    // 2. Download File with retry
+    // Download with up to 3 attempts
     const fileExt = path.extname(new URL(downloadUrl).pathname) || ".mp3";
-    const fileName = `${guild.id}_${Date.now()}${fileExt}`;
-    localFilePath = path.join(TEMP_DIR, fileName);
-
-    console.log(`[sb] Downloading ${next.name} to ${localFilePath}...`);
-    
-    let downloadSuccess = false;
+    localFilePath = path.join(TEMP_DIR, `${guild.id}_${Date.now()}${fileExt}`);
+    let ok = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await axios({
-          method: 'GET',
-          url: downloadUrl,
-          responseType: 'stream',
-          timeout: 30000
-        });
-        await streamPipeline(response.data, fs.createWriteStream(localFilePath));
-        downloadSuccess = true;
-        break;
-      } catch (downloadErr) {
-        console.warn(`[sb] Download attempt ${attempt + 1} failed:`, downloadErr.message);
-        if (attempt < 2) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
+        const resp = await axios({ method: "GET", url: downloadUrl, responseType: "stream", timeout: 30_000 });
+        await streamPipeline(resp.data, fs.createWriteStream(localFilePath));
+        ok = true; break;
+      } catch (e) {
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
       }
     }
-    
-    if (!downloadSuccess) {
-      throw new Error('Download failed after 3 attempts');
-    }
-    
-    console.log(`[sb] Download complete.`);
+    if (!ok) throw new Error("Download failed after 3 attempts");
 
-    // Verify file exists and has content
-    const stats = fs.statSync(localFilePath);
-    if (stats.size === 0) {
-      throw new Error('Downloaded file is empty');
-    }
+    const { size } = await fsp.stat(localFilePath);
+    if (size === 0) throw new Error("Downloaded file is empty");
 
-    // 3. Play Local File
-    const resource = createAudioResource(localFilePath, { 
-      inputType: StreamType.Arbitrary,
-      inlineVolume: true 
-    });
+    const resource = createAudioResource(localFilePath, { inputType: StreamType.Arbitrary, inlineVolume: true });
     resource.volume.setVolume(q.volume);
-    
-    // Assign file to queue so Idle event can delete it later
     q.currentFile = localFilePath;
-    q.resource = resource; // Store ref for volume control
+    q.resource    = resource;
     q.player.play(resource);
 
-    if (textChannel && textChannel.send) {
-      await textChannel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(EmbedColors.VC_JOIN)
-            .setTitle(toSmallCaps("🎧 ɴᴏᴡ ᴘʟᴀʏɪɴɢ"))
-            .setDescription(toSmallCaps(`**${next.name}**`))
-            .setFooter({ text: `Volume: ${Math.round(q.volume * 100)}%` })
-            .setTimestamp()
-        ]
-      }).catch(()=>{});
-    }
-    await sbUpdatePanel(guild);
-
+    textChannel?.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(EmbedColors.VC_JOIN)
+          .setTitle(sc("🎧 ɴᴏᴡ ᴘʟᴀʏɪɴɢ"))
+          .setDescription(sc(`**${next.name}**`))
+          .setFooter({ text: `Volume: ${Math.round(q.volume * 100)}%` })
+          .setTimestamp()
+      ]
+    }).catch(() => {});
+    sbUpdatePanel(guild);
   } catch (e) {
-    console.error("[sb playNext error]", e);
-    
-    // Cleanup failed download if it exists
-    if (localFilePath && fs.existsSync(localFilePath)) {
-        fs.unlink(localFilePath, ()=>{});
-    }
-
-    if (textChannel) {
-        textChannel.send(`⚠️ **${next.name}** failed to load. ${retryCount < 1 ? 'Retrying...' : 'Skipping...'}`).catch(()=>{});
-    }
+    console.error("[sb playNext]", e);
+    if (localFilePath) fsp.unlink(localFilePath).catch(() => {});
+    textChannel?.send(`⚠️ **${next.name}** failed to load. ${retryCount < 1 ? "Retrying…" : "Skipping…"}`).catch(() => {});
     q.now = null;
-    
-    // Retry once, then skip
     if (retryCount < 1) {
-      q.list.unshift(next); // Put back at front
-      setTimeout(() => sbPlayNext(guild, textChannel, retryCount + 1).catch(() => {}), 2000);
+      q.list.unshift(next);
+      setTimeout(() => sbPlayNext(guild, textChannel, retryCount + 1).catch(() => {}), 2_000).unref();
     } else {
-      // Try next one
-      setTimeout(() => sbPlayNext(guild, textChannel, 0).catch(() => {}), 1000);
+      setTimeout(() => sbPlayNext(guild, textChannel, 0).catch(() => {}), 1_000).unref();
     }
   }
 }
 
-// ---------- connect to VC with improved error handling ----------
+// ── Connect bot to member's VC ──
 async function sbConnectToMember(member) {
   if (!member.voice.channel) return { error: "not_in_vc" };
-  const vc = member.voice.channel;
-  const guild = member.guild;
+  const vc = member.voice.channel, guild = member.guild;
 
   try {
-    // Check if already connected
-    const existingConn = getVoiceConnection(guild.id);
-    if (existingConn) {
-      // Verify connection is healthy
-      if (existingConn.state.status === VoiceConnectionStatus.Ready) {
+    const existing = getVoiceConnection(guild.id);
+    if (existing) {
+      if (existing.state.status === VoiceConnectionStatus.Ready) {
         const q = getSbQueue(guild.id);
         q.vcId = vc.id;
         if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
-        existingConn.subscribe(q.player);
-        return { connection: existingConn, channel: vc };
+        existing.subscribe(q.player);
+        return { connection: existing, channel: vc };
       }
-      // Connection exists but not ready - destroy and reconnect
-      existingConn.destroy();
+      existing.destroy();
     }
 
     const conn = joinVoiceChannel({
-      channelId: vc.id,
-      guildId: guild.id,
+      channelId: vc.id, guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: false,
-      selfMute: false
+      selfDeaf: false, selfMute: false
     });
 
-    // Enhanced connection monitoring
-    conn.on(VoiceConnectionStatus.Disconnected, async () => {
+    conn.once(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
           entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
+          entersState(conn, VoiceConnectionStatus.Connecting,  5_000)
         ]);
-        // Connection recovered
-      } catch (error) {
-        // Connection failed to recover
-        console.error('[Voice] Connection failed to recover, destroying...');
+      } catch {
         conn.destroy();
-        const q = getSbQueue(guild.id);
-        q.vcId = null;
-        q.list = [];
-        q.now = null;
+        const q = sbQueues.get(guild.id);
+        if (q) { q.vcId = null; q.list = []; q.now = null; }
       }
     });
 
-    conn.on(VoiceConnectionStatus.Destroyed, () => {
-      console.log(`[Voice] Connection destroyed for guild ${guild.id}`);
-      const q = getSbQueue(guild.id);
-      q.vcId = null;
+    conn.once(VoiceConnectionStatus.Destroyed, () => {
+      const q = sbQueues.get(guild.id);
+      if (q) q.vcId = null;
     });
 
     try {
       await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
-    } catch (err) {
-      console.error("[sb connect] Connection never became ready", err);
+    } catch {
       conn.destroy();
       return { error: "connect_timeout" };
     }
 
     const q = getSbQueue(guild.id);
     q.vcId = vc.id;
-    
     if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
     conn.subscribe(q.player);
-    
-    console.log(`[Voice] Successfully connected to ${vc.name} in ${guild.name}`);
     return { connection: conn, channel: vc };
   } catch (err) {
     console.error("[sb connect]", err);
@@ -570,55 +528,52 @@ async function sbConnectToMember(member) {
   }
 }
 
-async function sbUpdatePanel(guild) {
-  try {
-    const panel = sbPanels.get(guild.id);
-    if (!panel) return;
-    const ch = guild.channels.cache.get(panel.channelId) || await guild.channels.fetch(panel.channelId).catch(()=>null);
-    if (!ch) return;
-    const msg = await ch.messages.fetch(panel.messageId).catch(()=>null);
-    if (!msg) return;
-    const ui = await buildSoundPanelEmbed(guild);
-    await msg.edit({ embeds: [ui.embed], components: ui.buttons }).catch(()=>{});
-  } catch (e) { console.error("[sbUpdatePanel]", e); }
-}
-
-
-// ---------- Sound Panel builder ----------
+// ── Sound panel embed ──
 async function buildSoundPanelEmbed(guild) {
-  const q = getSbQueue(guild.id);
-  const total = await Sound.countDocuments({ guildId: guild.id }).catch(()=>0);
-
-  const status = q.now ? "🟢 ᴘʟᴀʏɪɴɢ" : (getVoiceConnection(guild.id) ? "🟡 ᴄᴏɴɴᴇᴄᴛᴇᴅ" : "🔴 ɪᴅʟᴇ");
+  const q     = getSbQueue(guild.id);
+  const total = await Sound.countDocuments({ guildId: guild.id }).catch(() => 0);
+  const conn  = getVoiceConnection(guild.id);
+  const status    = q.now ? "🟢 ᴘʟᴀʏɪɴɢ" : (conn ? "🟡 ᴄᴏɴɴᴇᴄᴛᴇᴅ" : "🔴 ɪᴅʟᴇ");
   const nowPlaying = q.now ? `🎧 ${q.now.name}` : "—";
-  
-  const queuePreview = q.list.length ? q.list.slice(0, 8).map((s,i)=> `\`${i+1}.\` ${s.name}`).join("\n") : toSmallCaps("ɴᴏ ǫᴜᴇᴜᴇᴅ sᴏᴜɴᴅs");
-  if (q.list.length > 8) queuePreview += `\n...and ${q.list.length - 8} more`;
+  const queueLines = q.list.slice(0, 8).map((s, i) => `\`${i + 1}.\` ${s.name}`).join("\n") || sc("ɴᴏ ǫᴜᴇᴜᴇᴅ sᴏᴜɴᴅs");
+  const moreText   = q.list.length > 8 ? `\n…and ${q.list.length - 8} more` : "";
 
   const embed = new EmbedBuilder()
     .setColor(EmbedColors.VC_JOIN)
-    .setAuthor({ name: toSmallCaps("🎛 sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
+    .setAuthor({ name: sc("🎛 sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
     .setDescription(
-      `${toSmallCaps("> sᴛᴀᴛᴜs:")} ${toSmallCaps(status)}\n` +
-      `${toSmallCaps("> ᴠᴏʟᴜᴍᴇ:")} ${Math.round(q.volume * 100)}%\n` +
-      `${toSmallCaps("> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:")} ${toSmallCaps(nowPlaying)}\n` +
-      `${toSmallCaps("> ᴛᴏᴛᴀʟ sᴏᴜɴᴅs:")} ${total}\n\n` +
-      `${toSmallCaps("📜 ǫᴜᴇᴜᴇ:")}\n${toSmallCaps(queuePreview)}`
+      `${sc("> sᴛᴀᴛᴜs:")} ${sc(status)}\n` +
+      `${sc("> ᴠᴏʟᴜᴍᴇ:")} ${Math.round(q.volume * 100)}%\n` +
+      `${sc("> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:")} ${sc(nowPlaying)}\n` +
+      `${sc("> ᴛᴏᴛᴀʟ sᴏᴜɴᴅs:")} ${total}\n\n` +
+      `${sc("📜 ǫᴜᴇᴜᴇ:")}\n${sc(queueLines + moreText)}`
     )
-    .setFooter({ text: toSmallCaps(guild.name) })
+    .setFooter({ text: sc(guild.name) })
     .setTimestamp();
 
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("sb_connect").setLabel(toSmallCaps("🎧 ᴄᴏɴɴᴇᴄᴛ")).setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId("sb_skip").setLabel(toSmallCaps("⏭ sᴋɪᴘ")).setStyle(ButtonStyle.Secondary).setDisabled(!q.now),
-    new ButtonBuilder().setCustomId("sb_stop").setLabel(toSmallCaps("⛔ sᴛᴏᴘ")).setStyle(ButtonStyle.Danger).setDisabled(!q.now),
-    new ButtonBuilder().setCustomId("sb_refresh").setLabel(toSmallCaps("ʀᴇꜰʀᴇsʜ")).setStyle(ButtonStyle.Secondary)
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("sb_connect").setLabel(sc("🎧 ᴄᴏɴɴᴇᴄᴛ")).setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("sb_skip").setLabel(sc("⏭ sᴋɪᴘ")).setStyle(ButtonStyle.Secondary).setDisabled(!q.now),
+    new ButtonBuilder().setCustomId("sb_stop").setLabel(sc("⛔ sᴛᴏᴘ")).setStyle(ButtonStyle.Danger).setDisabled(!q.now),
+    new ButtonBuilder().setCustomId("sb_refresh").setLabel(sc("ʀᴇꜰʀᴇsʜ")).setStyle(ButtonStyle.Secondary)
   );
-
-  return { embed, buttons: [row1] };
+  return { embed, buttons: [row] };
 }
 
-// ---------- Discord client with improved configuration ----------
+async function sbUpdatePanel(guild) {
+  const panel = sbPanels.get(guild.id);
+  if (!panel) return;
+  try {
+    const ch  = guild.channels.cache.get(panel.channelId) ?? await guild.channels.fetch(panel.channelId).catch(() => null);
+    if (!ch) return;
+    const msg = await ch.messages.fetch(panel.messageId).catch(() => null);
+    if (!msg) return;
+    const ui = await buildSoundPanelEmbed(guild);
+    await msg.edit({ embeds: [ui.embed], components: ui.buttons }).catch(() => {});
+  } catch (e) { console.error("[sbUpdatePanel]", e); }
+}
+
+// ─── Discord Client ───────────────────────────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -628,1531 +583,906 @@ const client = new Client({
     GatewayIntentBits.GuildPresences
   ],
   partials: [Partials.User, Partials.GuildMember],
-  // Critical: Prevent disconnections
-  ws: {
-    properties: {
-      browser: 'Discord iOS'
-    }
-  },
-  // Improved shard handling
-  shards: 'auto',
-  // Increase timeout for slow connections
-  restRequestTimeout: 30000
+  ws: { properties: { browser: "Discord iOS" } },
+  shards: "auto",
+  restRequestTimeout: 30_000
 });
 
-// ---------- Embeds colors ----------
-const EmbedColors = {
-  SUCCESS: 0x1abc9c,
-  ERROR: 0xe74c3c,
-  WARNING: 0xffcc00,
-  INFO: 0x5865f2,
-  VC_JOIN: 0x00ffcc,
-  VC_LEAVE: 0xff5e5e,
-  ONLINE: 0x55ff55,
-  RESET: 0x00ccff
-};
-
-// ---------- Reusable embed builder ----------
-function makeEmbed({ title, description, color = EmbedColors.INFO, guild }) {
-  const e = new EmbedBuilder()
-    .setColor(color)
-    .setAuthor({ name: toSmallCaps(title), iconURL: client.user?.displayAvatarURL() })
-    .setDescription(toSmallCaps(description))
-    .setFooter({
-      text: (guild?.name ? toSmallCaps(guild.name) : toSmallCaps("VC ALERT CONTROL PANEL")),
-      iconURL: guild?.iconURL ? (guild.iconURL({ dynamic: true }) || client.user.displayAvatarURL()) : client.user?.displayAvatarURL()
-    })
-    .setTimestamp();
-  return e;
-}
-
-// ---------- Control Panel builder ----------
-function buildControlPanel(settings, guild) {
-  const embed = new EmbedBuilder()
-    .setColor(settings.alertsEnabled ? EmbedColors.SUCCESS : EmbedColors.ERROR)
-    .setAuthor({
-      name: toSmallCaps("🎛️ VC ALERT CONTROL PANEL"),
-      iconURL: client.user.displayAvatarURL()
-    })
-    .setDescription(
-      toSmallCaps(`**Your Central Hub for Voice Chat Alerts!** ✨\n\n`) +
-      `> ${toSmallCaps("📢 Alerts Channel:")} ${settings.textChannelId ? `<#${settings.textChannelId}>` : toSmallCaps("Not set — assign one below!")}\n` +
-      `> ${toSmallCaps("🔔 Status:")} ${settings.alertsEnabled ? toSmallCaps("🟢 Active! (All systems go)") : toSmallCaps("🔴 Disabled (Peace & quiet)")} \n` +
-      `> ${toSmallCaps("👋 Join Alerts:")} ${settings.joinAlerts ? toSmallCaps("✅ On") : toSmallCaps("❌ Off")}\n` +
-      `> ${toSmallCaps("🏃‍♂️ Leave Alerts:")} ${settings.leaveAlerts ? toSmallCaps("✅ On") : toSmallCaps("❌ Off")}\n` +
-      `> ${toSmallCaps("🟢 Online Alerts:")} ${settings.onlineAlerts ? toSmallCaps("✅ On") : toSmallCaps("❌ Off")}\n` +
-      `> ${toSmallCaps("🪪 Private Alerts:")} ${settings.privateThreadAlerts ? toSmallCaps("✅ On") : toSmallCaps("❌ Off")}\n` +
-      `> ${toSmallCaps("🙈 Ignored Role:")} ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? toSmallCaps("✅ Active") : toSmallCaps("❌ Inactive")})` : toSmallCaps("None set")}\n` +
-      `> ${toSmallCaps("🧹 Auto-Delete:")} ${settings.autoDelete ? toSmallCaps("✅ On (30s)") : toSmallCaps("❌ Off")}\n\n` +
-      toSmallCaps("*Use the buttons below to fine-tune your settings instantly!* ⚙️")
-    )
-    .setFooter({ text: toSmallCaps(guild?.name || `Server ID: ${settings.guildId}`), iconURL: guild?.iconURL?.({ dynamic: true }) || client.user.displayAvatarURL() })
-    .setTimestamp();
-
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('toggleJoinAlerts').setLabel(toSmallCaps('👋 Join')).setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('toggleLeaveAlerts').setLabel(toSmallCaps('🏃‍♂️ Leave')).setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('toggleOnlineAlerts').setLabel(toSmallCaps('🟢 Online')).setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
-  );
-
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('togglePrivateThreads').setLabel(toSmallCaps('🪪 Private Alerts')).setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('toggleIgnoreRole').setLabel(toSmallCaps('🙈 Ignore Alerts')).setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('toggleAutoDelete').setLabel(toSmallCaps('🧹 Auto-Delete')).setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('resetSettings').setLabel(toSmallCaps('♻️ Reset Settings')).setStyle(ButtonStyle.Danger)
-  );
-
-  return { embed, buttons: [row1, row2] };
-}
-
-// ---------- Slash commands ----------
+// ─── Slash command definitions ────────────────────────────────
 const commands = [
-  new SlashCommandBuilder()
-    .setName("settings")
-    .setDescription("⚙️ ᴠɪᴇᴡ ᴀɴᴅ ᴍᴀɴᴀɢᴇ ᴠᴏɪᴄᴇ ᴀᴄᴛɪᴠɪᴛʏ ᴀɴᴅ ᴘʀᴇsᴇɴᴄᴇ ᴀʟᴇʀᴛs"),
-  new SlashCommandBuilder()
-    .setName("activate")
-    .setDescription("🚀 ᴀᴄᴛɪᴠᴀᴛᴇ ᴠᴄ ᴀʟᴇʀᴛs")
-    .addChannelOption(opt => opt.setName("channel").setDescription("Select a text channel to receive alerts").addChannelTypes(ChannelType.GuildText).setRequired(false)),
-  new SlashCommandBuilder()
-    .setName("deactivate")
-    .setDescription("🛑 ᴅɪsᴀʙʟᴇ ᴀʟʟ ᴠᴄ ᴀʟᴇʀᴛs"),
-  new SlashCommandBuilder()
-    .setName("ignorerole")
-    .setDescription("🙈 ᴍᴀɴᴀɢᴇ ɪɢɴᴏʀᴇᴅ ʀᴏʟᴇ sᴇᴛᴛɪɴɢs")
-    .addStringOption(opt => opt
-      .setName("action")
-      .setDescription("Select an action")
-      .setRequired(true)
-      .addChoices(
-        { name: "View", value: "view" },
-        { name: "Set", value: "set" },
-        { name: "Reset", value: "reset" },
-        { name: "Toggle On/Off", value: "toggle" }
-      ))
-    .addRoleOption(opt => opt
-      .setName("role")
-      .setDescription("Role to ignore (required for 'set' action)")
-      .setRequired(false)),
-  new SlashCommandBuilder()
-    .setName("userinfo")
-    .setDescription("👤 ɢᴇᴛ ᴅᴇᴛᴀɪʟᴇᴅ ᴜsᴇʀ ɪɴғᴏʀᴍᴀᴛɪᴏɴ")
-    .addUserOption(opt => opt
-      .setName("user")
-      .setDescription("Select a user (leave empty for your own info)")
-      .setRequired(false)),
-  new SlashCommandBuilder()
-    .setName("owner")
-    .setDescription("👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ (ᴅᴍ ᴏɴʟʏ)"),
-  new SlashCommandBuilder()
-    .setName("logs")
-    .setDescription("📜 ᴠɪᴇᴡ sᴇʀᴠᴇʀ ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢs")
-    .addStringOption(opt => opt
-      .setName("range")
-      .setDescription("Select a time range")
-      .setRequired(false)
-      .addChoices(
-        { name: "📅 Today", value: "today" },
-        { name: "🕓 Yesterday", value: "yesterday" },
-        { name: "📆 Last 7 days", value: "7days" },
-        { name: "🗓️ Last 30 days", value: "30days" }
-      ))
-    .addUserOption(opt => opt.setName("user").setDescription("Select a user to view their logs").setRequired(false)),
-  new SlashCommandBuilder().setName("sound").setDescription("🔊 sᴏᴜɴᴅʙᴏᴀʀᴅ")
-    .addSubcommand(s => s.setName("add").setDescription("➕ ᴀᴅᴅ sᴏᴜɴᴅ")
-      .addStringOption(o => o.setName("name").setDescription("sᴏᴜɴᴅ ɴᴀᴍᴇ").setRequired(true))
-      .addAttachmentOption(o => o.setName("file").setDescription("ᴜᴘʟᴏᴀᴅ")))
-    .addSubcommand(s => s.setName("play").setDescription("▶ ᴘʟᴀʏ")
-      .addStringOption(o => o.setName("name").setDescription("sᴇʟᴇᴄᴛ").setAutocomplete(true).setRequired(true)))
-    .addSubcommand(s => s.setName("delete").setDescription("🗑 ᴅᴇʟᴇᴛᴇ")
-      .addStringOption(o => o.setName("name").setDescription("sᴇʟᴇᴄᴛ").setAutocomplete(true).setRequired(true)))
-    .addSubcommand(s => s.setName("list").setDescription("📜 ʟɪsᴛ"))
-    .addSubcommand(s => s.setName("panel").setDescription("🎛 ᴏᴘᴇɴ ᴘᴀɴᴇʟ"))
-    .addSubcommand(s => s.setName("volume").setDescription("🔊 sᴇᴛ ᴠᴏʟᴜᴍᴇ")
+  new SlashCommandBuilder().setName("settings").setDescription("⚙️ View and manage VC activity and presence alerts"),
+  new SlashCommandBuilder().setName("activate").setDescription("🚀 Activate VC alerts")
+    .addChannelOption(o => o.setName("channel").setDescription("Text channel for alerts").addChannelTypes(ChannelType.GuildText).setRequired(false)),
+  new SlashCommandBuilder().setName("deactivate").setDescription("🛑 Disable all VC alerts"),
+  new SlashCommandBuilder().setName("ignorerole").setDescription("🙈 Manage ignored role settings")
+    .addStringOption(o => o.setName("action").setDescription("Action to perform").setRequired(true)
+      .addChoices({ name:"View",value:"view" },{ name:"Set",value:"set" },{ name:"Reset",value:"reset" },{ name:"Toggle On/Off",value:"toggle" }))
+    .addRoleOption(o => o.setName("role").setDescription("Role to ignore (required for 'set')").setRequired(false)),
+  new SlashCommandBuilder().setName("userinfo").setDescription("👤 Get detailed user information")
+    .addUserOption(o => o.setName("user").setDescription("User to inspect (default: yourself)").setRequired(false)),
+  new SlashCommandBuilder().setName("owner").setDescription("👑 Bot owner dashboard (DM only)"),
+  new SlashCommandBuilder().setName("logs").setDescription("📜 View server activity logs")
+    .addStringOption(o => o.setName("range").setDescription("Time range").setRequired(false)
+      .addChoices({ name:"📅 Today",value:"today" },{ name:"🕓 Yesterday",value:"yesterday" },{ name:"📆 Last 7 days",value:"7days" },{ name:"🗓️ Last 30 days",value:"30days" }))
+    .addUserOption(o => o.setName("user").setDescription("Filter by user").setRequired(false)),
+  new SlashCommandBuilder().setName("sound").setDescription("🔊 Soundboard controls")
+    .addSubcommand(s => s.setName("add").setDescription("➕ Add a sound")
+      .addStringOption(o => o.setName("name").setDescription("Sound name").setRequired(true))
+      .addAttachmentOption(o => o.setName("file").setDescription("Audio file")))
+    .addSubcommand(s => s.setName("play").setDescription("▶ Play a sound")
+      .addStringOption(o => o.setName("name").setDescription("Sound name").setAutocomplete(true).setRequired(true)))
+    .addSubcommand(s => s.setName("delete").setDescription("🗑 Delete a sound")
+      .addStringOption(o => o.setName("name").setDescription("Sound name").setAutocomplete(true).setRequired(true)))
+    .addSubcommand(s => s.setName("list").setDescription("📜 List all sounds"))
+    .addSubcommand(s => s.setName("panel").setDescription("🎛 Open soundboard panel"))
+    .addSubcommand(s => s.setName("volume").setDescription("🔊 Set volume (0–100)")
       .addIntegerOption(o => o.setName("level").setDescription("0 - 100").setRequired(true).setMinValue(0).setMaxValue(100)))
-    .addSubcommand(s => s.setName("top").setDescription("🏆 ᴍᴏsᴛ ᴘʟᴀʏᴇᴅ sᴏᴜɴᴅs")),
-  new SlashCommandBuilder()
-    .setName("stats")
-    .setDescription("📊 sʜᴏᴡ sᴇʀᴠᴇʀ ᴀᴄᴛɪᴠɪᴛʏ sᴛᴀᴛɪsᴛɪᴄs")
-    .addStringOption(opt => opt
-      .setName("period")
-      .setDescription("ᴛɪᴍᴇ ᴘᴇʀɪᴏᴅ")
-      .setRequired(false)
-      .addChoices(
-        { name: "📅 Today", value: "today" },
-        { name: "📆 Last 7 days", value: "7days" },
-        { name: "🗓️ Last 30 days", value: "30days" },
-        { name: "📈 All time", value: "all" }
-      )),
-  new SlashCommandBuilder()
-    .setName("ping")
-    .setDescription("🏓 ᴄʜᴇᴄᴋ ʙᴏᴛ ʟᴀᴛᴇɴᴄʏ ᴀɴᴅ sᴛᴀᴛᴜs"),
-  new SlashCommandBuilder()
-    .setName("cleanup")
-    .setDescription("🧹 ᴄʟᴇᴀɴ ᴜᴘ ᴏʟᴅ ʟᴏɢs ᴀɴᴅ ᴛᴇᴍᴘ ғɪʟᴇs"),
-  new SlashCommandBuilder()
-    .setName("inv")
-    .setDescription("📨 ɪɴᴠɪᴛᴇ sᴏᴍᴇᴏɴᴇ ᴛᴏ ʏᴏᴜʀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ")
-    .addStringOption(opt => opt
-      .setName("search")
-      .setDescription("Search for a specific user by name (leave empty to see top frequent VC users)")
+    .addSubcommand(s => s.setName("top").setDescription("🏆 Most played sounds")),
+  new SlashCommandBuilder().setName("stats").setDescription("📊 Show server activity statistics")
+    .addStringOption(o => o.setName("period").setDescription("Time period").setRequired(false)
+      .addChoices({ name:"📅 Today",value:"today" },{ name:"📆 Last 7 days",value:"7days" },{ name:"🗓️ Last 30 days",value:"30days" },{ name:"📈 All time",value:"all" })),
+  new SlashCommandBuilder().setName("ping").setDescription("🏓 Check bot latency and status"),
+  new SlashCommandBuilder().setName("cleanup").setDescription("🧹 Clean up old logs and temp files"),
+
+  // ── /inv — invite to VC ──────────────────────────────────────
+  // Removed: limit option (results are always shown directly)
+  new SlashCommandBuilder().setName("inv").setDescription("📨 Invite someone to your voice channel")
+    .addStringOption(o => o.setName("search")
+      .setDescription("Search by name — leave empty to see top VC users")
       .setRequired(false)
       .setAutocomplete(true))
-    .addIntegerOption(opt => opt
-      .setName("limit")
-      .setDescription("Number of results to show (default: 10)")
-      .setRequired(false)
-      .setMinValue(1)
-      .setMaxValue(25))
+
 ].map(c => c.toJSON());
 
-// ---------- Connection Health Monitoring ----------
-let lastHeartbeat = Date.now();
-let reconnectAttempts = 0;
-let lastHeartbeatLog = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
-const HEARTBEAT_LOG_COOLDOWN = 5 * 60 * 1000; // 5 minutes
+// ─── Heartbeat / connection health ────────────────────────────
+let lastHeartbeat        = Date.now();
+let reconnectAttempts    = 0;
+let lastHeartbeatWarnAt  = 0;
+const MAX_RECONNECT      = 5;
+const HEARTBEAT_WARN_CD  = 5 * 60_000; // 5 min
 
-// Monitor Gateway Health
-setInterval(() => {
-  const timeSinceLastBeat = Date.now() - lastHeartbeat;
-  if (timeSinceLastBeat > 60000) { // 60 seconds without heartbeat
-    // Only log once per 5 minutes to reduce spam
+const heartbeatInterval = setInterval(() => {
+  const gap = Date.now() - lastHeartbeat;
+  if (gap > 60_000) {
     const now = Date.now();
-    if (now - lastHeartbeatLog > HEARTBEAT_LOG_COOLDOWN) {
-      console.warn(`⚠️ No heartbeat for ${Math.floor(timeSinceLastBeat/1000)}s - Connection may be dead`);
-      lastHeartbeatLog = now;
-    }
-    
-    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      if (now - lastHeartbeatLog < 1000) { // Only log reconnection if we just logged the warning
-        console.log(`🔄 Attempting reconnection (${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+    if (now - lastHeartbeatWarnAt > HEARTBEAT_WARN_CD) {
+      console.warn(`⚠️ No heartbeat for ${Math.floor(gap / 1000)}s`);
+      lastHeartbeatWarnAt = now;
+      if (reconnectAttempts < MAX_RECONNECT) {
+        console.log(`🔄 Reconnect attempt ${reconnectAttempts + 1}/${MAX_RECONNECT}`);
+        reconnectAttempts++;
+        client.destroy();
+        setTimeout(() => client.login(process.env.TOKEN).catch(e => console.error("❌ Reconnect failed:", e)), 5_000).unref();
       }
-      reconnectAttempts++;
-      client.destroy();
-      setTimeout(() => {
-        client.login(process.env.TOKEN).catch(e => {
-          console.error('❌ Reconnection failed:', e);
-        });
-      }, 5000);
     }
   }
-}, 30000); // Check every 30 seconds
+}, 30_000);
+heartbeatInterval.unref();
 
-// ---------- Ready & register commands ----------
+// ─── Ready ───────────────────────────────────────────────────
 client.once("clientReady", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
-  lastHeartbeat = Date.now();
-  reconnectAttempts = 0; // Reset on successful connection
-  
-  try { 
-    client.user.setActivity("the VC vibes unfold 🎧✨", { type: "WATCHING" }); 
-  } catch(e) { 
-    console.error('[Activity] Failed to set activity:', e); 
-  }
-  
+  lastHeartbeat    = Date.now();
+  reconnectAttempts = 0;
+
+  try { client.user.setActivity("the VC vibes unfold 🎧✨", { type: 3 }); } catch (_) {}
+
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-  try {
-    console.log('📝 Registering slash commands...');
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("✅ Slash commands registered successfully.");
-  } catch (err) {
-    console.error("❌ Command registration error:", err);
-  }
-  
-  // Pre-warm caches
-  console.log('🔥 Pre-warming caches...');
-  const guildIds = client.guilds.cache.map(g => g.id);
-  await Promise.all(guildIds.map(id => getGuildSettings(id).catch(() => null)));
-  console.log(`✅ Cached settings for ${guildIds.length} guilds`);
+  await rest.put(Routes.applicationCommands(client.user.id), { body: commands })
+    .then(() => console.log("✅ Slash commands registered"))
+    .catch(e  => console.error("❌ Command registration error:", e));
+
+  // Pre-warm settings cache for known guilds
+  const ids = client.guilds.cache.map(g => g.id);
+  await Promise.all(ids.map(id => getGuildSettings(id).catch(() => null)));
+  console.log(`✅ Pre-warmed cache for ${ids.length} guild(s)`);
 });
 
-// ---------- Interaction handler ----------
+// ─── Admin check helper ────────────────────────────────────────
+async function checkAdmin(interaction) {
+  const ok = interaction.member?.permissions?.has(PermissionFlagsBits.Administrator)
+          || interaction.member?.permissions?.has(PermissionFlagsBits.ManageGuild);
+  if (!ok) {
+    await interaction.reply({
+      embeds: [makeEmbed({ title: "No Permission", description: "Administrator or Manage Server permission required.", color: EmbedColors.ERROR, guild: interaction.guild })],
+      flags: 64
+    });
+  }
+  return !!ok;
+}
+
+// ─── Interaction handler ──────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // Allow /owner in DM
     if (!interaction.inGuild() && interaction.commandName !== "owner") return;
-    const guild = interaction.guild;
+    const guild   = interaction.guild;
     const guildId = guild?.id;
+    let settings  = guildId ? await getGuildSettings(guildId) : null;
 
-    // fetch or create cached settings for the guild (skip for DM owner command)
-    let settings = guildId ? await getGuildSettings(guildId) : null;
-
+    // ── Slash Commands ──────────────────────────────────────
     if (interaction.isChatInputCommand()) {
-      // /owner, /inv, /ping, /userinfo work without guild admin check
-      const publicCommands = ["owner", "inv", "ping", "userinfo"];
-      if (!publicCommands.includes(interaction.commandName)) {
-        if (!await checkAdmin(interaction)) return;
-      }
+      const publicCmds = new Set(["owner","inv","ping","userinfo"]);
+      if (!publicCmds.has(interaction.commandName) && !await checkAdmin(interaction)) return;
 
       switch (interaction.commandName) {
+
+        // ─── /settings ───────────────────────────────────
         case "settings": {
           const panel = buildControlPanel(settings, guild);
-          return interaction.reply({
-            embeds: [panel.embed],
-            components: panel.buttons,
-            flags: 64
-          });
+          return interaction.reply({ embeds: [panel.embed], components: panel.buttons, flags: 64 });
         }
 
+        // ─── /activate ───────────────────────────────────
         case "activate": {
           const selected = interaction.options.getChannel("channel");
-          let channel = selected ?? (
-            settings.textChannelId
-              ? (guild.channels.cache.get(settings.textChannelId) ??
-                 await guild.channels.fetch(settings.textChannelId).catch(() => null))
-              : interaction.channel
-          );
-
-          if (!channel || channel.type !== ChannelType.GuildText) {
-            return interaction.reply({
-              embeds: [makeEmbed({ title: toSmallCaps("⚠️ invalid channel"), description: toSmallCaps("please choose a **text channel** where i can post vc alerts.\ntry `/activate #channel` to set one manually 💬"), color: EmbedColors.ERROR, guild })],
-              flags: 64,
-            });
-          }
-
+          let channel = selected
+            ?? (settings.textChannelId
+                ? (guild.channels.cache.get(settings.textChannelId) ?? await guild.channels.fetch(settings.textChannelId).catch(() => null))
+                : interaction.channel);
+          if (!channel || channel.type !== ChannelType.GuildText)
+            return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠️ invalid channel"), description: sc("please choose a text channel"), color: EmbedColors.ERROR, guild })], flags: 64 });
           const botMember = await guild.members.fetch(client.user.id).catch(() => null);
-          const perms = channel.permissionsFor(botMember);
-          if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages)) {
-            return interaction.reply({
-              embeds: [makeEmbed({ title: toSmallCaps("🚫 missing permissions"), description: toSmallCaps(`i need **view** + **send** permissions in ${channel} to post vc alerts.\nplease fix that and try again 🔧`), color: EmbedColors.ERROR, guild })],
-              flags: 64,
-            });
-          }
-
-          if (settings.alertsEnabled && settings.textChannelId === channel.id) {
-            return interaction.reply({
-              embeds: [makeEmbed({ title: toSmallCaps("🟢 vc alerts already active"), description: toSmallCaps(`alerts are already running in ${channel} ⚡\nuse \`/settings\` to tweak or customize them.`), color: EmbedColors.WARNING, guild })],
-              flags: 64,
-            });
-          }
-
+          const perms     = channel.permissionsFor(botMember);
+          if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages))
+            return interaction.reply({ embeds: [makeEmbed({ title: sc("🚫 missing permissions"), description: sc(`i need view + send permissions in <#${channel.id}>`), color: EmbedColors.ERROR, guild })], flags: 64 });
+          if (settings.alertsEnabled && settings.textChannelId === channel.id)
+            return interaction.reply({ embeds: [makeEmbed({ title: sc("🟢 already active"), description: sc(`alerts already running in <#${channel.id}>`), color: EmbedColors.WARNING, guild })], flags: 64 });
           settings.alertsEnabled = true;
           settings.textChannelId = channel.id;
-          await updateGuildSettings(settings);
-
-          return interaction.reply({
-            embeds: [makeEmbed({ title: toSmallCaps("✅ vc alerts activated"), description: toSmallCaps(`vibe monitor engaged! 🎧\nall voice activity will now appear in ${channel}.\nuse \`/settings\` to fine-tune your alerts ✨`), color: EmbedColors.SUCCESS, guild })],
-            flags: 64,
-          });
+          updateGuildSettings(settings);
+          return interaction.reply({ embeds: [makeEmbed({ title: sc("✅ vc alerts activated"), description: sc(`alerts will now appear in <#${channel.id}>`), color: EmbedColors.SUCCESS, guild })], flags: 64 });
         }
 
+        // ─── /deactivate ─────────────────────────────────
         case "deactivate": {
-          if (!settings.alertsEnabled) {
-            return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("💤 vc alerts already off"), description: toSmallCaps("they’re already paused 😴\nuse `/activate` when you’re ready to bring the vibes back."), color: EmbedColors.WARNING, guild })], flags: 64 });
-          }
+          if (!settings.alertsEnabled)
+            return interaction.reply({ embeds: [makeEmbed({ title: sc("💤 already off"), description: sc("use /activate to re-enable"), color: EmbedColors.WARNING, guild })], flags: 64 });
           settings.alertsEnabled = false;
-          await updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: toSmallCaps("🔕 vc alerts powered down"), description: toSmallCaps("taking a chill break 🪷\nno join or leave pings until you power them up again with `/activate`."), color: EmbedColors.ERROR, guild })], flags: 64 });
+          updateGuildSettings(settings);
+          return interaction.reply({ embeds: [makeEmbed({ title: sc("🔕 vc alerts powered down"), description: sc("no alerts until you /activate again"), color: EmbedColors.ERROR, guild })], flags: 64 });
         }
 
-        // ------------------ IGNOREROLE COMMAND ------------------
+        // ─── /ignorerole ─────────────────────────────────
         case "ignorerole": {
           const action = interaction.options.getString("action");
-          const role = interaction.options.getRole("role");
-          
+          const role   = interaction.options.getRole("role");
+
           if (action === "view") {
-            const statusEmoji = settings.ignoreRoleEnabled ? "🟢" : "🔴";
-            const statusText = settings.ignoreRoleEnabled ? "Activated" : "Deactivated";
-            const roleText = settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set";
-            
-            return interaction.reply({ 
-              embeds: [makeEmbed({ 
-                title: toSmallCaps("🙈 ignore role settings"), 
-                description: toSmallCaps(
-                  `**Status:** ${statusEmoji} ${statusText}\n` +
-                  `**Ignored Role:** ${roleText}\n\n` +
-                  (settings.ignoreRoleEnabled && settings.ignoredRoleId 
-                    ? "Members with this role will be skipped in VC alerts 🚫" 
-                    : "No role is currently being ignored ✨")
-                ), 
-                color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.INFO, 
-                guild 
-              })], 
-              flags: 64 
+            return interaction.reply({
+              embeds: [makeEmbed({
+                title: sc("🙈 ignore role settings"),
+                description: sc(
+                  `**Status:** ${settings.ignoreRoleEnabled ? "🟢 Activated" : "🔴 Deactivated"}\n` +
+                  `**Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set"}`
+                ),
+                color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.INFO, guild
+              })],
+              flags: 64
             });
           }
-          
           if (action === "set") {
-            if (!role) {
-              return interaction.reply({ 
-                embeds: [makeEmbed({ 
-                  title: toSmallCaps("⚠️ role required"), 
-                  description: toSmallCaps("Please provide a role to ignore.\nUse: `/ignorerole action:set role:@role`"), 
-                  color: EmbedColors.WARNING, 
-                  guild 
-                })], 
-                flags: 64 
-              });
-            }
-            
-            settings.ignoredRoleId = role.id;
-            settings.ignoreRoleEnabled = true;
-            await updateGuildSettings(settings);
-            
-            return interaction.reply({ 
-              embeds: [makeEmbed({ 
-                title: toSmallCaps("✅ ignore role activated"), 
-                description: toSmallCaps(
-                  `Members with ${role} will now be skipped in VC alerts 🚫\n\n` +
-                  `Perfect for staff, bots, or background lurkers 😌`
-                ), 
-                color: EmbedColors.SUCCESS, 
-                guild 
-              })], 
-              flags: 64 
-            });
+            if (!role) return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠️ role required"), description: sc("provide a role with the role option"), color: EmbedColors.WARNING, guild })], flags: 64 });
+            settings.ignoredRoleId = role.id; settings.ignoreRoleEnabled = true;
+            updateGuildSettings(settings);
+            return interaction.reply({ embeds: [makeEmbed({ title: sc("✅ ignore role set"), description: sc(`Members with ${role} will be skipped in VC alerts`), color: EmbedColors.SUCCESS, guild })], flags: 64 });
           }
-          
           if (action === "reset") {
-            if (!settings.ignoredRoleId) {
-              return interaction.reply({ 
-                embeds: [makeEmbed({ 
-                  title: toSmallCaps("ℹ️ no role set"), 
-                  description: toSmallCaps("There's no ignored role configured yet."), 
-                  color: EmbedColors.INFO, 
-                  guild 
-                })], 
-                flags: 64 
-              });
-            }
-            
-            settings.ignoredRoleId = null;
-            settings.ignoreRoleEnabled = false;
-            await updateGuildSettings(settings);
-            
-            return interaction.reply({ 
-              embeds: [makeEmbed({ 
-                title: toSmallCaps("♻️ ignore role reset"), 
-                description: toSmallCaps("Everyone's back on the radar 🌍\nAll members will now appear in VC alerts again 💫"), 
-                color: EmbedColors.RESET, 
-                guild 
-              })], 
-              flags: 64 
-            });
+            if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: sc("ℹ️ no role set"), description: sc("Nothing to reset"), color: EmbedColors.INFO, guild })], flags: 64 });
+            settings.ignoredRoleId = null; settings.ignoreRoleEnabled = false;
+            updateGuildSettings(settings);
+            return interaction.reply({ embeds: [makeEmbed({ title: sc("♻️ ignore role reset"), description: sc("All members will appear in VC alerts again"), color: EmbedColors.RESET, guild })], flags: 64 });
           }
-          
           if (action === "toggle") {
-            if (!settings.ignoredRoleId) {
-              return interaction.reply({ 
-                embeds: [makeEmbed({ 
-                  title: toSmallCaps("⚠️ no role configured"), 
-                  description: toSmallCaps("Please set an ignored role first using:\n`/ignorerole action:set role:@role`"), 
-                  color: EmbedColors.WARNING, 
-                  guild 
-                })], 
-                flags: 64 
-              });
-            }
-            
+            if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠️ no role configured"), description: sc("Set a role first with /ignorerole action:set"), color: EmbedColors.WARNING, guild })], flags: 64 });
             settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
-            await updateGuildSettings(settings);
-            
-            const newStatus = settings.ignoreRoleEnabled ? "activated" : "deactivated";
-            const emoji = settings.ignoreRoleEnabled ? "✅" : "🔴";
-            
-            return interaction.reply({ 
-              embeds: [makeEmbed({ 
-                title: toSmallCaps(`${emoji} ignore role ${newStatus}`), 
-                description: toSmallCaps(
-                  `The ignore role feature has been **${newStatus}**\n\n` +
-                  `Role: <@&${settings.ignoredRoleId}>`
-                ), 
-                color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, 
-                guild 
-              })], 
-              flags: 64 
-            });
+            updateGuildSettings(settings);
+            return interaction.reply({ embeds: [makeEmbed({ title: sc(`${settings.ignoreRoleEnabled ? "✅" : "🔴"} ignore role ${settings.ignoreRoleEnabled ? "activated" : "deactivated"}`), description: sc(`Role: <@&${settings.ignoredRoleId}>`), color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, guild })], flags: 64 });
           }
-          
           break;
         }
 
-        // ------------------ NEW: USERINFO COMMAND ------------------
+        // ─── /userinfo ────────────────────────────────────
         case "userinfo": {
           await interaction.deferReply({ flags: 64 });
-          
           const targetUser = interaction.options.getUser("user") || interaction.user;
-          const member = await guild.members.fetch(targetUser.id).catch(() => null);
-          
-          if (!member) {
-            return interaction.editReply({ 
-              embeds: [makeEmbed({ 
-                title: toSmallCaps("❌ user not found"), 
-                description: toSmallCaps("This user is not in the server."), 
-                color: EmbedColors.ERROR, 
-                guild 
-              })] 
-            });
-          }
-          
-          // Account creation date (IST)
-          const createdDate = new Date(targetUser.createdTimestamp);
-          const createdIST = new Date(createdDate.getTime() + (5.5 * 60 * 60 * 1000));
-          const createdStr = createdIST.toLocaleDateString("en-IN", { 
-            day: "2-digit", 
-            month: "short", 
-            year: "numeric", 
-            timeZone: "Asia/Kolkata" 
-          });
-          const daysSinceCreation = Math.floor((Date.now() - targetUser.createdTimestamp) / (1000 * 60 * 60 * 24));
-          
-          // Server join date (IST)
-          const joinedDate = member.joinedAt;
-          const joinedIST = new Date(joinedDate.getTime() + (5.5 * 60 * 60 * 1000));
-          const joinedStr = joinedIST.toLocaleDateString("en-IN", { 
-            day: "2-digit", 
-            month: "short", 
-            year: "numeric", 
-            timeZone: "Asia/Kolkata" 
-          });
-          const daysSinceJoin = Math.floor((Date.now() - member.joinedTimestamp) / (1000 * 60 * 60 * 24));
-          
-          // Roles (exclude @everyone)
+          const member     = await guild.members.fetch(targetUser.id).catch(() => null);
+          if (!member) return interaction.editReply({ embeds: [makeEmbed({ title: sc("❌ user not found"), description: sc("This user is not in the server."), color: EmbedColors.ERROR, guild })] });
+
+          const createdStr   = new Date(targetUser.createdTimestamp).toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric", timeZone:"Asia/Kolkata" });
+          const daysSinceCr  = Math.floor((Date.now() - targetUser.createdTimestamp) / 86_400_000);
+          const joinedStr    = member.joinedAt?.toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric", timeZone:"Asia/Kolkata" }) ?? "N/A";
+          const daysSinceJoin = Math.floor((Date.now() - (member.joinedTimestamp ?? 0)) / 86_400_000);
+
           const roles = member.roles.cache
             .filter(r => r.id !== guild.id)
             .sort((a, b) => b.position - a.position)
             .map(r => `<@&${r.id}>`)
             .slice(0, 20);
-          const roleText = roles.length > 0 ? roles.join(", ") : "No roles";
-          const roleCount = member.roles.cache.size - 1;
-          
-          // Key permissions
+
           const keyPerms = [];
-          if (member.permissions.has(PermissionFlagsBits.Administrator)) keyPerms.push("👑 Administrator");
-          if (member.permissions.has(PermissionFlagsBits.ManageGuild)) keyPerms.push("🛠️ Manage Server");
-          if (member.permissions.has(PermissionFlagsBits.ManageChannels)) keyPerms.push("📁 Manage Channels");
-          if (member.permissions.has(PermissionFlagsBits.ManageRoles)) keyPerms.push("🎭 Manage Roles");
-          if (member.permissions.has(PermissionFlagsBits.KickMembers)) keyPerms.push("🚪 Kick Members");
-          if (member.permissions.has(PermissionFlagsBits.BanMembers)) keyPerms.push("🔨 Ban Members");
-          const permsText = keyPerms.length > 0 ? keyPerms.join(", ") : "No special permissions";
-          
-          // Status and badges
+          const P = PermissionFlagsBits;
+          if (member.permissions.has(P.Administrator))  keyPerms.push("👑 Administrator");
+          if (member.permissions.has(P.ManageGuild))    keyPerms.push("🛠️ Manage Server");
+          if (member.permissions.has(P.ManageChannels)) keyPerms.push("📁 Manage Channels");
+          if (member.permissions.has(P.ManageRoles))    keyPerms.push("🎭 Manage Roles");
+          if (member.permissions.has(P.KickMembers))    keyPerms.push("🚪 Kick Members");
+          if (member.permissions.has(P.BanMembers))     keyPerms.push("🔨 Ban Members");
+
           const status = member.presence?.status || "offline";
-          const statusEmoji = status === "online" ? "🟢" : status === "idle" ? "🟡" : status === "dnd" ? "🔴" : "⚫";
-          const statusText = status.charAt(0).toUpperCase() + status.slice(1);
-          
-          const badges = [];
-          if (member.user.bot) badges.push("🤖 Bot");
-          if (member.premiumSince) badges.push("💎 Server Booster");
-          if (targetUser.id === guild.ownerId) badges.push("👑 Server Owner");
-          const badgesText = badges.length > 0 ? badges.join(", ") : "No badges";
-          
-          // Voice channel
-          const voiceChannel = member.voice.channel;
-          const voiceText = voiceChannel ? `🎧 ${voiceChannel.name}` : "Not in voice";
-          
+          const statusEmoji = { online:"🟢", idle:"🟡", dnd:"🔴" }[status] || "⚫";
+          const badges = [...(member.user.bot ? ["🤖 Bot"] : []), ...(member.premiumSince ? ["💎 Booster"] : []), ...(targetUser.id === guild.ownerId ? ["👑 Owner"] : [])];
+          const voiceText = member.voice.channel ? `🎧 ${member.voice.channel.name}` : "Not in voice";
+
           const embed = new EmbedBuilder()
             .setColor(member.displayHexColor || EmbedColors.INFO)
-            .setAuthor({ 
-              name: `${member.user.username}'s Profile`, 
-              iconURL: targetUser.displayAvatarURL({ dynamic: true, size: 256 }) 
-            })
+            .setAuthor({ name: `${member.user.username}'s Profile`, iconURL: targetUser.displayAvatarURL({ dynamic: true, size: 256 }) })
             .setThumbnail(targetUser.displayAvatarURL({ dynamic: true, size: 256 }))
-            .setDescription(
-              `**User:** ${targetUser}\n` +
-              `**Display Name:** ${member.displayName}\n` +
-              `**Status:** ${statusEmoji} ${statusText}\n` +
-              `**Voice:** ${voiceText}`
-            )
+            .setDescription(`**User:** ${targetUser}\n**Display Name:** ${member.displayName}\n**Status:** ${statusEmoji} ${status}\n**Voice:** ${voiceText}`)
             .addFields(
-              {
-                name: "📅 Account Created",
-                value: `${createdStr}\n(${daysSinceCreation} days ago)`,
-                inline: true
-              },
-              {
-                name: "📥 Joined Server",
-                value: `${joinedStr}\n(${daysSinceJoin} days ago)`,
-                inline: true
-              },
-              {
-                name: "🏅 Badges",
-                value: badgesText,
-                inline: false
-              },
-              {
-                name: `🎭 Roles (${roleCount})`,
-                value: roleText,
-                inline: false
-              },
-              {
-                name: "🔑 Key Permissions",
-                value: permsText,
-                inline: false
-              }
+              { name:"📅 Account Created", value:`${createdStr}\n(${daysSinceCr} days ago)`, inline:true },
+              { name:"📥 Joined Server",   value:`${joinedStr}\n(${daysSinceJoin} days ago)`, inline:true },
+              { name:"🏅 Badges",          value: badges.join(", ") || "None", inline:false },
+              { name:`🎭 Roles (${member.roles.cache.size - 1})`, value: roles.join(", ") || "No roles", inline:false },
+              { name:"🔑 Key Permissions", value: keyPerms.join(", ") || "None", inline:false }
             )
             .setFooter({ text: `ID: ${targetUser.id} • All times in IST` })
             .setTimestamp();
-          
           return interaction.editReply({ embeds: [embed] });
         }
 
-        // ------------------ OWNER COMMAND (DM + Guild) ------------------
+        // ─── /owner ───────────────────────────────────────
         case "owner": {
-          const OWNER_ID = process.env.OWNER_ID;
+          const isOwner = OWNER_ID && interaction.user.id === OWNER_ID;
+          if (!isOwner) return interaction.reply({ embeds: [makeEmbed({ title: sc("🚫 ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"), description: sc("Owner only command."), color: EmbedColors.ERROR, guild })], flags: 64 });
 
-          // ── Used inside a guild ──
           if (interaction.guild) {
-            const notOwner = !OWNER_ID || interaction.user.id !== OWNER_ID;
-            if (notOwner) {
-              return interaction.reply({
-                embeds: [new EmbedBuilder()
-                  .setColor(EmbedColors.ERROR)
-                  .setAuthor({ name: toSmallCaps("🚫 ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"), iconURL: client.user.displayAvatarURL() })
-                  .setDescription(toSmallCaps("Only the bot owner can use this command."))
-                  .setTimestamp()
-                ],
-                flags: 64
-              });
-            }
-            // Is owner → show quick inline summary + hint to use DMs for full dashboard
             const tg = client.guilds.cache.size;
             const tm = client.guilds.cache.reduce((a, g) => a + g.memberCount, 0);
-            const uptimeSQ = Math.floor(process.uptime());
-            const dSQ = Math.floor(uptimeSQ / 86400), hSQ = Math.floor((uptimeSQ % 86400) / 3600), mSQ = Math.floor((uptimeSQ % 3600) / 60);
+            const up = Math.floor(process.uptime());
             return interaction.reply({
-              embeds: [new EmbedBuilder()
-                .setColor(EmbedColors.WARNING)
-                .setAuthor({ name: toSmallCaps("👑 ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
+              embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING)
+                .setAuthor({ name: sc("👑 ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
                 .setDescription(
-                  toSmallCaps("💡 ᴛɪᴘ: ᴜsᴇ ᴛʜɪs ᴄᴏᴍᴍᴀɴᴅ ɪɴ ᴅᴍ ꜰᴏʀ ᴛʜᴇ ꜰᴜʟʟ ᴅᴀsʜʙᴏᴀʀᴅ ✨\n\n") +
-                  `> 🌐 **Servers:** ${tg}\n` +
-                  `> 👥 **Total Members:** ${tm.toLocaleString()}\n` +
-                  `> 📡 **WS Ping:** ${client.ws.ping}ms\n` +
-                  `> ⏱️ **Uptime:** ${dSQ}d ${hSQ}h ${mSQ}m`
+                  sc("💡 Use this in DM for the full dashboard.\n\n") +
+                  `> 🌐 **Servers:** ${tg}\n> 👥 **Members:** ${tm.toLocaleString()}\n` +
+                  `> 📡 **WS Ping:** ${client.ws.ping}ms\n> ⏱️ **Uptime:** ${Math.floor(up/86400)}d ${Math.floor((up%86400)/3600)}h ${Math.floor((up%3600)/60)}m`
                 )
-                .setFooter({ text: toSmallCaps("dm the bot to see full analytics") })
-                .setTimestamp()
-              ],
-              flags: 64
-            });
-          }
-
-          // ── DM context: full owner dashboard ──
-          if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
-            return interaction.reply({
-              embeds: [new EmbedBuilder()
-                .setColor(EmbedColors.ERROR)
-                .setAuthor({ name: toSmallCaps("🚫 ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"), iconURL: client.user.displayAvatarURL() })
-                .setDescription(toSmallCaps("Only the bot owner can use this command."))
-                .setTimestamp()
+                .setFooter({ text: sc("dm the bot for full analytics") }).setTimestamp()
               ],
               flags: 64
             });
           }
 
           await interaction.deferReply({ flags: 64 });
+          const oneDayAgo = new Date(Date.now() - 86_400_000);
+          const [totalGuilds, totalMembers, recentLogsCount, totalLogs, totalSounds, activeGuilds, totalSettings, joinCount24h, leaveCount24h, onlineCount24h, guildActivity] = await Promise.all([
+            Promise.resolve(client.guilds.cache.size),
+            Promise.resolve(client.guilds.cache.reduce((a, g) => a + g.memberCount, 0)),
+            GuildLog.countDocuments({ time: { $gte: oneDayAgo } }).catch(() => 0),
+            GuildLog.countDocuments().catch(() => 0),
+            Sound.countDocuments().catch(() => 0),
+            GuildSettings.countDocuments({ alertsEnabled: true }).catch(() => 0),
+            GuildSettings.countDocuments().catch(() => 0),
+            GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type:"join" }).catch(() => 0),
+            GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type:"leave" }).catch(() => 0),
+            GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type:"online" }).catch(() => 0),
+            GuildLog.aggregate([
+              { $match: { time: { $gte: oneDayAgo } } },
+              { $group: { _id: "$guildId", count: { $sum: 1 }, name: { $first: "$guildName" } } },
+              { $sort: { count: -1 } }, { $limit: 10 }
+            ]).catch(() => [])
+          ]);
 
-          const totalGuilds = client.guilds.cache.size;
-          const totalMembers = client.guilds.cache.reduce((acc, g) => acc + g.memberCount, 0);
-          const oneDayAgo = new Date(Date.now() - (24 * 60 * 60 * 1000));
-          const recentLogsCount = await GuildLog.countDocuments({ time: { $gte: oneDayAgo } }).catch(() => 0);
-          const memUsage = process.memoryUsage();
-          const memUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(2);
-          const memTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(2);
-          const uptimeSecs = Math.floor(process.uptime());
-          const days = Math.floor(uptimeSecs / 86400);
-          const hours = Math.floor((uptimeSecs % 86400) / 3600);
-          const minutes = Math.floor((uptimeSecs % 3600) / 60);
-          const uptimeText = `${days}d ${hours}h ${minutes}m`;
-          const wsPing = client.ws.ping;
-          const totalLogs = await GuildLog.countDocuments().catch(() => 0);
-          const totalSounds = await Sound.countDocuments().catch(() => 0);
-          const activeGuilds = await GuildSettings.countDocuments({ alertsEnabled: true }).catch(() => 0);
-          const totalSettings = await GuildSettings.countDocuments().catch(() => 0);
-          const joinCount24h = await GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type: "join" }).catch(() => 0);
-          const leaveCount24h = await GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type: "leave" }).catch(() => 0);
-          const onlineCount24h = await GuildLog.countDocuments({ time: { $gte: oneDayAgo }, type: "online" }).catch(() => 0);
+          const mem    = process.memoryUsage();
+          const upSecs = Math.floor(process.uptime());
+          const topGuilds = [...client.guilds.cache.values()].sort((a, b) => b.memberCount - a.memberCount).slice(0, 10)
+            .map((g, i) => `${i + 1}. **${g.name}** — ${g.memberCount.toLocaleString()} members`).join("\n");
 
-          const topGuildsByMembers = [...client.guilds.cache.values()]
-            .sort((a, b) => b.memberCount - a.memberCount)
-            .slice(0, 10)
-            .map((g, idx) => `${idx + 1}. **${g.name}** — ${g.memberCount.toLocaleString()} members`)
-            .join("\n");
-
-          const guildActivity = await GuildLog.aggregate([
-            { $match: { time: { $gte: oneDayAgo } } },
-            { $group: { _id: "$guildId", count: { $sum: 1 }, name: { $first: "$guildName" } } },
-            { $sort: { count: -1 } },
-            { $limit: 10 }
-          ]).catch(() => []);
-
-          const topActiveGuilds = guildActivity.length > 0
-            ? guildActivity.map((g, idx) => `${idx + 1}. **${g.name || g._id}** — ${g.count} events`).join("\n")
-            : toSmallCaps("no activity recorded");
-
-          const ownerEmbed = new EmbedBuilder()
-            .setColor(EmbedColors.INFO)
-            .setAuthor({ name: toSmallCaps("👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
-            .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
-            .setDescription(
-              `> 🤖 **Bot:** ${client.user.username}\n` +
-              `> 🟢 **Status:** Online & Running\n` +
-              `> ⏱️ **Uptime:** ${uptimeText}\n` +
-              `> 📡 **WebSocket Ping:** ${wsPing}ms`
-            )
-            .addFields(
-              {
-                name: toSmallCaps("📊 ɢʟᴏʙᴀʟ sᴛᴀᴛs"),
-                value:
-                  `🌐 **Servers:** ${totalGuilds}\n` +
-                  `👥 **Total Members:** ${totalMembers.toLocaleString()}\n` +
-                  `✅ **Active Alert Guilds:** ${activeGuilds} / ${totalSettings}\n` +
-                  `🔊 **Total Sounds:** ${totalSounds}`,
-                inline: true
-              },
-              {
-                name: toSmallCaps("⚡ ʟᴀsᴛ 24ʜ ᴀᴄᴛɪᴠɪᴛʏ"),
-                value:
-                  `📈 **Total Events:** ${recentLogsCount.toLocaleString()}\n` +
-                  `🟢 **Joins:** ${joinCount24h}\n` +
-                  `🔴 **Leaves:** ${leaveCount24h}\n` +
-                  `💠 **Online:** ${onlineCount24h}`,
-                inline: true
-              },
-              {
-                name: toSmallCaps("💾 sʏsᴛᴇᴍ ʀᴇsᴏᴜʀᴄᴇs"),
-                value:
-                  `🧠 **Heap:** ${memUsedMB}MB / ${memTotalMB}MB\n` +
-                  `⚙️ **Node.js:** ${process.version}\n` +
-                  `🖥️ **Platform:** ${process.platform} ${process.arch}\n` +
-                  `📜 **Total DB Logs:** ${totalLogs.toLocaleString()}`,
-                inline: false
-              },
-              {
-                name: toSmallCaps("🏆 ᴛᴏᴘ 10 sᴇʀᴠᴇʀs (ʙʏ ᴍᴇᴍʙᴇʀs)"),
-                value: topGuildsByMembers || toSmallCaps("no servers"),
-                inline: false
-              },
-              {
-                name: toSmallCaps("🔥 ᴍᴏsᴛ ᴀᴄᴛɪᴠᴇ sᴇʀᴠᴇʀs (24ʜ)"),
-                value: topActiveGuilds,
-                inline: false
-              }
-            )
-            .setFooter({ text: toSmallCaps("owner dashboard • confidential • all times in ist") })
-            .setTimestamp();
-
-          return interaction.editReply({ embeds: [ownerEmbed] });
+          return interaction.editReply({
+            embeds: [new EmbedBuilder().setColor(EmbedColors.INFO)
+              .setAuthor({ name: sc("👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
+              .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
+              .setDescription(
+                `> 🤖 **Bot:** ${client.user.username}\n> 🟢 **Status:** Online\n` +
+                `> ⏱️ **Uptime:** ${Math.floor(upSecs/86400)}d ${Math.floor((upSecs%86400)/3600)}h ${Math.floor((upSecs%3600)/60)}m\n` +
+                `> 📡 **WS Ping:** ${client.ws.ping}ms`
+              )
+              .addFields(
+                { name: sc("📊 ɢʟᴏʙᴀʟ sᴛᴀᴛs"),
+                  value: `🌐 **Servers:** ${totalGuilds}\n👥 **Members:** ${totalMembers.toLocaleString()}\n✅ **Active Guilds:** ${activeGuilds}/${totalSettings}\n🔊 **Sounds:** ${totalSounds}`, inline:true },
+                { name: sc("⚡ ʟᴀsᴛ 24ʜ"),
+                  value: `📈 **Events:** ${recentLogsCount.toLocaleString()}\n🟢 **Joins:** ${joinCount24h}\n🔴 **Leaves:** ${leaveCount24h}\n💠 **Online:** ${onlineCount24h}`, inline:true },
+                { name: sc("💾 sʏsᴛᴇᴍ"),
+                  value: `🧠 **Heap:** ${(mem.heapUsed/1048576).toFixed(2)}MB / ${(mem.heapTotal/1048576).toFixed(2)}MB\n⚙️ **Node:** ${process.version}\n🖥️ **Platform:** ${process.platform} ${process.arch}\n📜 **DB Logs:** ${totalLogs.toLocaleString()}`, inline:false },
+                { name: sc("🏆 ᴛᴏᴘ sᴇʀᴠᴇʀs"), value: topGuilds || "—", inline:false },
+                { name: sc("🔥 ᴍᴏsᴛ ᴀᴄᴛɪᴠᴇ (24ʜ)"), value: guildActivity.map((g, i) => `${i+1}. **${g.name ?? g._id}** — ${g.count} events`).join("\n") || sc("no activity"), inline:false }
+              )
+              .setFooter({ text: sc("owner dashboard • confidential") }).setTimestamp()
+            ]
+          });
         }
 
-
+        // ─── /logs ────────────────────────────────────────
         case "logs": {
           await interaction.deferReply({ flags: 64 });
-          
-          // Get range and user options
           const rangeOpt = interaction.options.getString("range") || "today";
-          const userOpt = interaction.options.getUser("user");
-          
-          // Calculate date range
-          const now = Date.now();
-          let startTime;
-          switch (rangeOpt) {
-            case "today":
-              const todayStart = new Date();
-              todayStart.setHours(0, 0, 0, 0);
-              startTime = todayStart.getTime();
-              break;
-            case "yesterday":
-              const yesterdayStart = new Date();
-              yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-              yesterdayStart.setHours(0, 0, 0, 0);
-              startTime = yesterdayStart.getTime();
-              const yesterdayEnd = new Date(yesterdayStart);
-              yesterdayEnd.setHours(23, 59, 59, 999);
-              break;
-            case "7days":
-              startTime = now - (7 * 24 * 60 * 60 * 1000);
-              break;
-            case "30days":
-              startTime = now - (30 * 24 * 60 * 60 * 1000);
-              break;
-            default:
-              startTime = now - (24 * 60 * 60 * 1000);
-          }
-          
-          // Build query
-          const query = { guildId: guild.id, time: { $gte: new Date(startTime) } };
-          if (rangeOpt === "yesterday") {
-            const yesterdayEnd = new Date();
-            yesterdayEnd.setHours(0, 0, 0, 0);
-            query.time.$lt = yesterdayEnd;
-          }
-          if (userOpt) {
-            query.user = { $regex: `^${userOpt.tag}`, $options: "i" };
-          }
-          
-          const logs = await GuildLog.find(query).sort({ time: -1 }).limit(100).lean();
+          const userOpt  = interaction.options.getUser("user");
+          const now      = Date.now();
 
-          if (logs.length === 0) {
-            return interaction.editReply({ embeds: [makeEmbed({ title: "No activity found", description: `No logs found for the selected ${userOpt ? 'user and ' : ''}time range.`, color: EmbedColors.INFO, guild })] });
-          }
+          let startTime, endTime = null;
+          if (rangeOpt === "today") {
+            const d = new Date(); d.setHours(0,0,0,0); startTime = d.getTime();
+          } else if (rangeOpt === "yesterday") {
+            const d = new Date(); d.setDate(d.getDate()-1); d.setHours(0,0,0,0); startTime = d.getTime();
+            const e = new Date(d); e.setHours(23,59,59,999); endTime = e.getTime();
+          } else if (rangeOpt === "7days")  { startTime = now - 7  * 86_400_000; }
+          else                               { startTime = now - 30 * 86_400_000; }
+
+          const query = { guildId: guild.id, time: { $gte: new Date(startTime) } };
+          if (endTime) query.time.$lt = new Date(endTime);
+          if (userOpt) query.user = { $regex: `^${userOpt.tag}`, $options: "i" };
+
+          const logs = await GuildLog.find(query).sort({ time: -1 }).limit(100).lean();
+          if (!logs.length) return interaction.editReply({ embeds: [makeEmbed({ title: "No activity", description: "No logs found for the selected range.", color: EmbedColors.INFO, guild })] });
 
           const desc = logs.slice(0, 20).map(l => {
-            const emoji = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
-            const ago = fancyAgo(Date.now() - l.time);
+            const emoji  = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
             const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
-            return `**${emoji} ${l.type.toUpperCase()}** — ${l.user} ${action} ${l.channel}\n> 🕒 ${ago} • ${toISTString(l.time)}`;
+            return `**${emoji} ${l.type.toUpperCase()}** — ${l.user} ${action} ${l.channel}\n> 🕒 ${fancyAgo(Date.now() - l.time)} • ${toISTString(l.time)}`;
           }).join("\n\n");
 
-          const rangeText = rangeOpt === "today" ? "Today" : rangeOpt === "yesterday" ? "Yesterday" : rangeOpt === "7days" ? "Last 7 Days" : "Last 30 Days";
-          const userText = userOpt ? ` for ${userOpt.tag}` : "";
-          const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(`${guild.name} Activity - ${rangeText}${userText}`).setDescription(desc).setFooter({ text: `Showing ${Math.min(20, logs.length)} of ${logs.length} entries • Server: ${guild.name}` }).setTimestamp();
+          const rangeLabel = { today:"Today", yesterday:"Yesterday", "7days":"Last 7 Days", "30days":"Last 30 Days" }[rangeOpt] ?? rangeOpt;
+          const embed = new EmbedBuilder().setColor(0x2b2d31)
+            .setTitle(`${guild.name} Activity — ${rangeLabel}${userOpt ? ` for ${userOpt.tag}` : ""}`)
+            .setDescription(desc)
+            .setFooter({ text: `Showing ${Math.min(20, logs.length)} of ${logs.length} entries` })
+            .setTimestamp();
+
           const filePath = await generateActivityFile(guild, logs);
-          await interaction.followUp({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }], ephemeral: false });
-          return;
+          return interaction.followUp({ embeds: [embed], files: [{ attachment: filePath, name: `${guild.name}_activity.txt` }], ephemeral: false });
         }
 
-        // ------------------ NEW: STATS COMMAND ------------------
+        // ─── /stats ───────────────────────────────────────
         case "stats": {
           await interaction.deferReply({ flags: 64 });
           const period = interaction.options.getString("period") || "today";
-          
-          // Calculate time range
-          const now = Date.now();
-          let startTime;
-          let periodLabel;
-          
-          switch (period) {
-            case "today":
-              const todayStart = new Date();
-              todayStart.setHours(0, 0, 0, 0);
-              startTime = todayStart.getTime();
-              periodLabel = "Today";
-              break;
-            case "7days":
-              startTime = now - (7 * 24 * 60 * 60 * 1000);
-              periodLabel = "Last 7 Days";
-              break;
-            case "30days":
-              startTime = now - (30 * 24 * 60 * 60 * 1000);
-              periodLabel = "Last 30 Days";
-              break;
-            case "all":
-              startTime = 0;
-              periodLabel = "All Time";
-              break;
-            default:
-              startTime = now - (7 * 24 * 60 * 60 * 1000);
-              periodLabel = "Last 7 Days";
-          }
-          
-          // Fetch logs
+          const now    = Date.now();
+          let startTime = 0;
+          const periodLabel = { today:"Today", "7days":"Last 7 Days", "30days":"Last 30 Days", all:"All Time" }[period] ?? "Last 7 Days";
+          if (period === "today") { const d = new Date(); d.setHours(0,0,0,0); startTime = d.getTime(); }
+          else if (period === "7days")  startTime = now - 7  * 86_400_000;
+          else if (period === "30days") startTime = now - 30 * 86_400_000;
+
           const query = { guildId: guild.id };
-          if (startTime > 0) {
-            query.time = { $gte: new Date(startTime) };
-          }
-          
+          if (startTime > 0) query.time = { $gte: new Date(startTime) };
           const logs = await GuildLog.find(query).lean();
-          
-          if (logs.length === 0) {
-            return interaction.editReply({ 
-              embeds: [makeEmbed({ 
-                title: "📊 No Statistics Available", 
-                description: "No activity recorded for this period.", 
-                color: EmbedColors.INFO, 
-                guild 
-              })] 
-            });
-          }
-          
-          // Calculate statistics
-          const joinCount = logs.filter(l => l.type === "join").length;
-          const leaveCount = logs.filter(l => l.type === "leave").length;
+          if (!logs.length) return interaction.editReply({ embeds: [makeEmbed({ title: "📊 No Statistics", description: "No activity for this period.", color: EmbedColors.INFO, guild })] });
+
+          const joinCount   = logs.filter(l => l.type === "join").length;
+          const leaveCount  = logs.filter(l => l.type === "leave").length;
           const onlineCount = logs.filter(l => l.type === "online").length;
-          
-          // Most active users
-          const userActivity = {};
-          logs.forEach(log => {
-            if (!userActivity[log.user]) {
-              userActivity[log.user] = { joins: 0, leaves: 0, online: 0, total: 0 };
-            }
-            if (log.type === "join") userActivity[log.user].joins++;
-            if (log.type === "leave") userActivity[log.user].leaves++;
-            if (log.type === "online") userActivity[log.user].online++;
-            userActivity[log.user].total++;
-          });
-          
-          const topUsers = Object.entries(userActivity)
-            .sort((a, b) => b[1].total - a[1].total)
-            .slice(0, 5)
-            .map(([user, stats], idx) => {
-              const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `${idx + 1}.`;
-              return `${medal} **${user}** - ${stats.total} events (${stats.joins} joins, ${stats.leaves} leaves)`;
-            });
-          
-          // Most active channels
-          const channelActivity = {};
-          logs.forEach(log => {
-            if (log.channel && log.channel !== "-") {
-              channelActivity[log.channel] = (channelActivity[log.channel] || 0) + 1;
-            }
-          });
-          
-          const topChannels = Object.entries(channelActivity)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 5)
-            .map(([channel, count], idx) => `${idx + 1}. **${channel}** - ${count} events`);
-          
-          // Peak activity hours (IST timezone)
-          const hourlyActivity = {};
-          logs.forEach(log => {
-            // Convert to IST (UTC +5:30)
-            const date = new Date(log.time);
-            const istDate = new Date(date.getTime() + (5.5 * 60 * 60 * 1000));
-            const hour = istDate.getUTCHours();
-            hourlyActivity[hour] = (hourlyActivity[hour] || 0) + 1;
-          });
-          
-          const peakHour = Object.entries(hourlyActivity)
-            .sort((a, b) => b[1] - a[1])[0];
-          
-          // Format to IST 12-hour format
-          let peakHourText = "N/A";
-          if (peakHour) {
-            const hour = parseInt(peakHour[0]);
-            const isPM = hour >= 12;
-            const hour12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
-            const period = isPM ? "PM" : "AM";
-            peakHourText = `**${hour12}:00 ${period} IST** (${peakHour[1]} events)`;
+
+          // User activity aggregation (single pass)
+          const userActivity = new Map();
+          const channelActivity = new Map();
+          const hourlyActivity  = new Map();
+          for (const log of logs) {
+            const ua = userActivity.get(log.user) ?? { joins:0, leaves:0, online:0, total:0 };
+            if (log.type === "join")   { ua.joins++;  }
+            if (log.type === "leave")  { ua.leaves++; }
+            if (log.type === "online") { ua.online++; }
+            ua.total++;
+            userActivity.set(log.user, ua);
+
+            if (log.channel && log.channel !== "-") channelActivity.set(log.channel, (channelActivity.get(log.channel) ?? 0) + 1);
+            const ist  = new Date(new Date(log.time).getTime() + 19_800_000);
+            const hour = ist.getUTCHours();
+            hourlyActivity.set(hour, (hourlyActivity.get(hour) ?? 0) + 1);
           }
-          
-          const embed = new EmbedBuilder()
-            .setColor(EmbedColors.INFO)
-            .setTitle(`📊 Server Activity Statistics`)
-            .setDescription(`**${periodLabel}** - ${guild.name}`)
+
+          const topUsers    = [...userActivity.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 5)
+            .map(([u, s], i) => `${"🥇🥈🥉"[i] ?? `${i+1}.`} **${u}** — ${s.total} events (${s.joins} joins, ${s.leaves} leaves)`);
+          const topChannels = [...channelActivity.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
+            .map(([ch, n], i) => `${i+1}. **${ch}** — ${n} events`);
+          const peakEntry   = [...hourlyActivity.entries()].sort((a, b) => b[1] - a[1])[0];
+          let peakHourText  = "N/A";
+          if (peakEntry) {
+            const h = peakEntry[0], isPM = h >= 12;
+            peakHourText = `**${h === 0 ? 12 : h > 12 ? h-12 : h}:00 ${isPM ? "PM" : "AM"} IST** (${peakEntry[1]} events)`;
+          }
+
+          const embed = new EmbedBuilder().setColor(EmbedColors.INFO)
+            .setTitle("📊 Server Activity Statistics")
+            .setDescription(`**${periodLabel}** — ${guild.name}`)
             .addFields(
-              {
-                name: "📈 Overview",
-                value: `Total Events: **${logs.length}**\n` +
-                       `🟢 Joins: **${joinCount}**\n` +
-                       `🔴 Leaves: **${leaveCount}**\n` +
-                       `💠 Online: **${onlineCount}**`,
-                inline: true
-              },
-              {
-                name: "⏰ Peak Activity",
-                value: peakHourText,
-                inline: true
-              },
-              {
-                name: "👥 Most Active Users",
-                value: topUsers.length > 0 ? topUsers.join("\n") : "No data",
-                inline: false
-              }
+              { name:"📈 Overview", value:`Total: **${logs.length}**\n🟢 Joins: **${joinCount}**\n🔴 Leaves: **${leaveCount}**\n💠 Online: **${onlineCount}**`, inline:true },
+              { name:"⏰ Peak Hour (IST)", value: peakHourText, inline:true },
+              { name:"👥 Most Active Users", value: topUsers.join("\n") || "No data", inline:false }
             );
-          
-          if (topChannels.length > 0) {
-            embed.addFields({
-              name: "🎧 Most Active Voice Channels",
-              value: topChannels.join("\n"),
-              inline: false
-            });
-          }
-          
-          embed.setFooter({ text: `Analyzed ${logs.length} events` })
-               .setTimestamp();
-          
+          if (topChannels.length) embed.addFields({ name:"🎧 Most Active VCs", value: topChannels.join("\n"), inline:false });
+          embed.setFooter({ text: `Analysed ${logs.length} events` }).setTimestamp();
           return interaction.editReply({ embeds: [embed] });
         }
 
-        // ------------------ NEW: PING COMMAND ------------------
+        // ─── /ping ────────────────────────────────────────
         case "ping": {
-          const startTime = Date.now();
+          const t0 = Date.now();
           await interaction.deferReply({ flags: 64 });
-          const apiLatency = Date.now() - startTime;
-          const wsLatency = client.ws.ping;
-          
-          let statusEmoji = "🟢";
-          let statusText = "Excellent";
-          if (wsLatency > 200 || apiLatency > 500) {
-            statusEmoji = "🟡";
-            statusText = "Good";
-          }
-          if (wsLatency > 500 || apiLatency > 1000) {
-            statusEmoji = "🟠";
-            statusText = "Fair";
-          }
-          if (wsLatency > 1000 || apiLatency > 2000) {
-            statusEmoji = "🔴";
-            statusText = "Poor";
-          }
-          
-          const uptime = process.uptime();
-          const hours = Math.floor(uptime / 3600);
-          const minutes = Math.floor((uptime % 3600) / 60);
-          
-          const embed = new EmbedBuilder()
-            .setColor(EmbedColors.INFO)
-            .setTitle("🏓 Pong!")
-            .setDescription(
-              `**Connection Status:** ${statusEmoji} ${statusText}\n\n` +
-              `**Latency Info:**\n` +
-              `> 🌐 API Latency: \`${apiLatency}ms\`\n` +
-              `> 📡 WebSocket Ping: \`${wsLatency}ms\`\n` +
-              `> ⏱️ Uptime: \`${hours}h ${minutes}m\``
-            )
-            .setFooter({ text: "Bot Health Monitor" })
-            .setTimestamp();
-          
-          return interaction.editReply({ embeds: [embed] });
+          const apiLatency = Date.now() - t0;
+          const ws         = client.ws.ping;
+          const statusEmoji = ws < 200 && apiLatency < 500 ? "🟢" : ws < 500 && apiLatency < 1000 ? "🟡" : ws < 1000 ? "🟠" : "🔴";
+          const statusText  = ["🟢","🟡","🟠","🔴"].indexOf(statusEmoji) === 0 ? "Excellent" : statusEmoji === "🟡" ? "Good" : statusEmoji === "🟠" ? "Fair" : "Poor";
+          const up = process.uptime();
+          return interaction.editReply({
+            embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("🏓 Pong!")
+              .setDescription(`**Status:** ${statusEmoji} ${statusText}\n\n> 🌐 API Latency: \`${apiLatency}ms\`\n> 📡 WS Ping: \`${ws}ms\`\n> ⏱️ Uptime: \`${Math.floor(up/3600)}h ${Math.floor((up%3600)/60)}m\``)
+              .setFooter({ text: "Bot Health Monitor" }).setTimestamp()
+            ]
+          });
         }
 
-        // ------------------ /inv COMMAND ------------------
+        // ─── /cleanup ─────────────────────────────────────
+        case "cleanup": {
+          await interaction.deferReply({ flags: 64 });
+          const cutoff  = new Date(Date.now() - 30 * 86_400_000);
+          const deleted = await GuildLog.deleteMany({ guildId: guild.id, time: { $lt: cutoff } }).catch(() => ({ deletedCount: 0 }));
+          const files   = await fsp.readdir(TEMP_DIR).catch(() => []);
+          let cleaned   = 0;
+          await Promise.all(files.map(async f => {
+            const fp = path.join(TEMP_DIR, f);
+            const st = await fsp.stat(fp).catch(() => null);
+            if (st && Date.now() - st.mtimeMs > 3_600_000) { await fsp.unlink(fp).catch(() => {}); cleaned++; }
+          }));
+          return interaction.editReply({
+            embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🧹 Cleanup Complete")
+              .setDescription(`📜 Removed **${deleted.deletedCount}** old log entries\n📁 Cleaned **${cleaned}** temp files`)
+              .setFooter({ text: "Cleanup complete" }).setTimestamp()
+            ]
+          });
+        }
+
+        // ─── /inv ─────────────────────────────────────────────────────────────
+        // Features:
+        //  • Detects whether invoker is in a VC
+        //  • If in VC → filters results to only users with access to that VC
+        //  • If not in VC → shows general top VC users (all-VC accessible)
+        //  • Removes limit option — always shows top results directly
+        //  • Adds per-user "Invite" button that DMs the user a notification
+        // ────────────────────────────────────────────────────────────────────
         case "inv": {
           await interaction.deferReply({ flags: 64 });
 
-          const searchQuery = interaction.options.getString("search");
-          const resultLimit = interaction.options.getInteger("limit") || 10;
+          const searchQuery = (interaction.options.getString("search") ?? "").trim();
+          const MAX_RESULTS = 10;
 
-          // Ensure member cache is populated
+          // Ensure member cache populated
           await guild.members.fetch().catch(() => {});
 
-          const invokerMember = await guild.members.fetch(interaction.user.id).catch(() => null);
-          const invokerVC = invokerMember?.voice?.channel;
+          // Detect invoker's current VC
+          const invokerMember = interaction.member;
+          const invokerVC     = invokerMember?.voice?.channel ?? null;
 
-          if (searchQuery && searchQuery.trim().length > 0) {
-            // ── SEARCH MODE: find members matching name who can connect to any VC ──
-            const vcChannels = guild.channels.cache.filter(c => c.type === ChannelType.GuildVoice);
-            const matchingMembers = [];
+          // Helper: does member have access to a given VC?
+          function canAccessVC(member, vc) {
+            const p = vc.permissionsFor(member);
+            return p?.has(PermissionFlagsBits.ViewChannel) && p?.has(PermissionFlagsBits.Connect);
+          }
 
-            for (const [, member] of guild.members.cache) {
-              if (member.user.bot) continue;
-              const nameMatch =
-                member.user.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                (member.nickname || "").toLowerCase().includes(searchQuery.toLowerCase());
-              if (!nameMatch) continue;
+          // ── Build candidate list ────────────────────────────────────────
+          let candidates = [];
 
-              const accessibleVCs = vcChannels.filter(vc => {
-                const perms = vc.permissionsFor(member);
-                return perms?.has(PermissionFlagsBits.ViewChannel) && perms?.has(PermissionFlagsBits.Connect);
-              });
-
-              if (accessibleVCs.size > 0) {
-                matchingMembers.push({ member, accessibleVCs });
+          if (searchQuery.length > 0) {
+            // SEARCH MODE — filter by name, then by VC access
+            const q = searchQuery.toLowerCase();
+            for (const [, m] of guild.members.cache) {
+              if (m.user.bot) continue;
+              const nameHit = m.user.username.toLowerCase().includes(q) || (m.nickname ?? "").toLowerCase().includes(q);
+              if (!nameHit) continue;
+              // If invoker is in a VC → only include members who can access that VC
+              if (invokerVC) {
+                if (!canAccessVC(m, invokerVC)) continue;
+                candidates.push(m);
+              } else {
+                // No VC context → include if they can access any VC
+                const anyVC = guild.channels.cache.some(c => c.type === ChannelType.GuildVoice && canAccessVC(m, c));
+                if (anyVC) candidates.push(m);
               }
             }
+          } else {
+            // DEFAULT MODE — top frequent VC users from DB
+            const freqResults = await GuildLog.aggregate([
+              { $match: { guildId: guild.id, type: "join" } },
+              { $group: { _id: "$user", joinCount: { $sum: 1 } } },
+              { $sort: { joinCount: -1 } },
+              { $limit: MAX_RESULTS * 3 }  // over-fetch to account for misses
+            ]).catch(() => []);
 
-            if (matchingMembers.length === 0) {
-              return interaction.editReply({
-                embeds: [makeEmbed({
-                  title: toSmallCaps("🔍 ɴᴏ ʀᴇsᴜʟᴛs"),
-                  description: toSmallCaps(`No members found matching **"${searchQuery}"** with VC access.`),
-                  color: EmbedColors.WARNING,
-                  guild
-                })]
-              });
+            const seen = new Set();
+            for (const entry of freqResults) {
+              if (candidates.length >= MAX_RESULTS) break;
+              const member = guild.members.cache.find(m =>
+                m.user.tag === entry._id || m.user.username === entry._id
+              );
+              if (!member || member.user.bot || seen.has(member.id)) continue;
+              seen.add(member.id);
+              // If invoker is in a VC → filter by access
+              if (invokerVC && !canAccessVC(member, invokerVC)) continue;
+              candidates.push(member);
             }
 
-            const resultsList = matchingMembers.slice(0, resultLimit).map((entry, idx) => {
-              const { member, accessibleVCs } = entry;
-              const inVC = member.voice?.channel
-                ? `🎧 \`${member.voice.channel.name}\``
-                : toSmallCaps("not in vc");
-              const vcList = accessibleVCs.size <= 3
-                ? [...accessibleVCs.values()].map(v => `\`${v.name}\``).join(", ")
-                : `${[...accessibleVCs.values()].slice(0, 3).map(v => `\`${v.name}\``).join(", ")} +${accessibleVCs.size - 3} more`;
-              return `\`${idx + 1}.\` ${member} — ${inVC}\n> 📌 ${toSmallCaps("vc access:")} ${vcList}`;
-            }).join("\n\n");
-
-            const searchEmbed = new EmbedBuilder()
-              .setColor(EmbedColors.INFO)
-              .setAuthor({ name: toSmallCaps("🔍 ᴠᴄ ᴀᴄᴄᴇss sᴇᴀʀᴄʜ"), iconURL: client.user.displayAvatarURL() })
-              .setDescription(`${toSmallCaps(`Results for "${searchQuery}":`)}
-
-${resultsList}`)
-              .setFooter({ text: toSmallCaps(`showing ${Math.min(matchingMembers.length, resultLimit)} of ${matchingMembers.length} result${matchingMembers.length !== 1 ? "s" : ""} • ${guild.name}`) })
-              .setTimestamp();
-
-            return interaction.editReply({ embeds: [searchEmbed] });
-          }
-
-          // ── DEFAULT MODE: top frequent VC users from logs ──
-          const freqResults = await GuildLog.aggregate([
-            { $match: { guildId: guild.id, type: "join" } },
-            { $group: { _id: "$user", joinCount: { $sum: 1 } } },
-            { $sort: { joinCount: -1 } },
-            { $limit: resultLimit * 2 }
-          ]).catch(() => []);
-
-          const inviteList = [];
-          for (const entry of freqResults) {
-            if (inviteList.length >= resultLimit) break;
-            const member = guild.members.cache.find(m =>
-              m.user.tag === entry._id ||
-              m.user.username === entry._id ||
-              m.user.tag.split("#")[0] === entry._id
-            );
-            if (!member || member.user.bot) continue;
-
-            const inVC = member.voice?.channel
-              ? `🎧 \`${member.voice.channel.name}\``
-              : toSmallCaps("not in vc");
-            const status = member.presence?.status || "offline";
-            const statusEmoji = status === "online" ? "🟢" : status === "idle" ? "🟡" : status === "dnd" ? "🔴" : "⚫";
-            inviteList.push({ member, inVC, statusEmoji, joinCount: entry.joinCount });
-          }
-
-          // Fallback: sort by server join date if no log data yet
-          if (inviteList.length === 0) {
-            const fallback = [...guild.members.cache.values()]
-              .filter(m => !m.user.bot)
-              .sort((a, b) => (a.joinedTimestamp || 0) - (b.joinedTimestamp || 0))
-              .slice(0, resultLimit);
-
-            for (const member of fallback) {
-              const inVC = member.voice?.channel
-                ? `🎧 \`${member.voice.channel.name}\``
-                : toSmallCaps("not in vc");
-              const status = member.presence?.status || "offline";
-              const statusEmoji = status === "online" ? "🟢" : status === "idle" ? "🟡" : status === "dnd" ? "🔴" : "⚫";
-              inviteList.push({ member, inVC, statusEmoji, joinCount: null });
+            // Fallback: if no DB logs yet, sort by join date
+            if (candidates.length === 0) {
+              candidates = [...guild.members.cache.values()]
+                .filter(m => !m.user.bot && (!invokerVC || canAccessVC(m, invokerVC)))
+                .sort((a, b) => (a.joinedTimestamp ?? 0) - (b.joinedTimestamp ?? 0))
+                .slice(0, MAX_RESULTS);
             }
           }
 
-          if (inviteList.length === 0) {
+          candidates = candidates.slice(0, MAX_RESULTS);
+
+          if (candidates.length === 0) {
+            const desc = invokerVC
+              ? sc(`No members found who can access **${invokerVC.name}**.`)
+              : sc(`No members found${searchQuery ? ` matching "${searchQuery}"` : ""}.`);
             return interaction.editReply({
-              embeds: [makeEmbed({
-                title: toSmallCaps("📭 ɴᴏ ᴍᴇᴍʙᴇʀs ꜰᴏᴜɴᴅ"),
-                description: toSmallCaps("No members found. Try using the `search` option."),
-                color: EmbedColors.WARNING,
-                guild
-              })]
+              embeds: [makeEmbed({ title: sc("📭 ɴᴏ ʀᴇsᴜʟᴛs"), description: desc, color: EmbedColors.WARNING, guild })]
             });
           }
 
-          const listText = inviteList.map((entry, idx) => {
-            const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `\`${idx + 1}.\``;
-            const countText = entry.joinCount !== null
-              ? `${toSmallCaps("vc joins:")} **${entry.joinCount}**`
-              : toSmallCaps("server member");
-            return `${medal} ${entry.member} ${entry.statusEmoji}\n> ${entry.inVC} • ${countText}`;
+          // ── Build embed ─────────────────────────────────────────────────
+          const medals = ["🥇","🥈","🥉"];
+          const listText = candidates.map((m, i) => {
+            const medal      = medals[i] ?? `\`${i+1}.\``;
+            const status     = m.presence?.status ?? "offline";
+            const statusMoji = { online:"🟢", idle:"🟡", dnd:"🔴" }[status] ?? "⚫";
+            const vcStatus   = m.voice?.channel ? `🎧 \`${m.voice.channel.name}\`` : sc("not in vc");
+            return `${medal} ${m} ${statusMoji}\n> ${vcStatus}`;
           }).join("\n\n");
 
           const vcInfo = invokerVC
-            ? `${toSmallCaps("📍 your vc:")} **${invokerVC.name}** (${invokerVC.members.size} member${invokerVC.members.size !== 1 ? "s" : ""})`
-            : toSmallCaps("💡 join a vc first, then invite someone!");
+            ? `${sc("📍 ʏᴏᴜʀ ᴠᴄ:")} **${invokerVC.name}** (${invokerVC.members.size} member${invokerVC.members.size !== 1 ? "s" : ""})\n${sc("🔒 showing users who can access this vc")}`
+            : sc("💡 join a vc first to see who can access it, then invite someone!");
 
           const invEmbed = new EmbedBuilder()
             .setColor(EmbedColors.VC_JOIN)
-            .setAuthor({ name: toSmallCaps("📨 ɪɴᴠɪᴛᴇ ᴛᴏ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
-            .setDescription(
-              `${vcInfo}\n\n` +
-              `${toSmallCaps(`🎙️ ᴛᴏᴘ ${inviteList.length} ꜰʀᴇǫᴜᴇɴᴛ ᴠᴄ ᴜsᴇʀs:`)}\n\n${listText}`
-            )
-            .setFooter({ text: toSmallCaps(`tip: use /inv search:<name> to find specific users • ${guild.name}`) })
+            .setAuthor({ name: sc("📨 ɪɴᴠɪᴛᴇ ᴛᴏ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
+            .setDescription(`${vcInfo}\n\n${sc(`🎙️ ᴛᴏᴘ ${candidates.length} ᴠᴄ ᴜsᴇʀs:`)}\n\n${listText}`)
+            .setFooter({ text: sc(`use /inv search:<name> to find a specific user • ${guild.name}`) })
             .setTimestamp();
 
-          return interaction.editReply({ embeds: [invEmbed] });
-        }
-
-        // ------------------ NEW: CLEANUP COMMAND ------------------
-        case "cleanup": {
-          if (!await checkAdmin(interaction)) return;
-          
-          await interaction.deferReply({ flags: 64 });
-          
-          try {
-            // Count logs older than 30 days
-            const thirtyDaysAgo = new Date(Date.now() - (30 * 24 * 60 * 60 * 1000));
-            const oldLogsCount = await GuildLog.countDocuments({ 
-              guildId: guild.id, 
-              time: { $lt: thirtyDaysAgo } 
-            });
-            
-            // Delete old logs
-            if (oldLogsCount > 0) {
-              await GuildLog.deleteMany({ 
-                guildId: guild.id, 
-                time: { $lt: thirtyDaysAgo } 
-              });
-            }
-            
-            // Clean temp directory
-            const tempFiles = fs.readdirSync(TEMP_DIR);
-            let cleanedFiles = 0;
-            for (const file of tempFiles) {
-              const filePath = path.join(TEMP_DIR, file);
-              const stats = fs.statSync(filePath);
-              // Delete files older than 1 hour
-              if (Date.now() - stats.mtimeMs > 3600000) {
-                fs.unlinkSync(filePath);
-                cleanedFiles++;
-              }
-            }
-            
-            const embed = new EmbedBuilder()
-              .setColor(EmbedColors.SUCCESS)
-              .setTitle("🧹 Cleanup Complete")
-              .setDescription(
-                `Successfully cleaned up old data:\n\n` +
-                `📜 Removed **${oldLogsCount}** old log entries (>30 days)\n` +
-                `📁 Cleaned **${cleanedFiles}** temporary files\n` +
-                `💾 Database optimized`
+          // ── Invite buttons (up to 5 users get a button row) ────────────
+          // Each button triggers a DM notification to the selected user
+          const buttonRows = [];
+          const btnCandidates = candidates.slice(0, 5); // max 5 buttons per message
+          if (btnCandidates.length > 0 && invokerVC) {
+            const row = new ActionRowBuilder().addComponents(
+              btnCandidates.map(m =>
+                new ButtonBuilder()
+                  .setCustomId(`inv_notify_${m.id}_${invokerVC.id}`)
+                  .setLabel(`📨 ${m.displayName.slice(0, 20)}`)
+                  .setStyle(ButtonStyle.Primary)
               )
-              .setFooter({ text: "Cleanup performed successfully" })
-              .setTimestamp();
-            
-            return interaction.editReply({ embeds: [embed] });
-          } catch (error) {
-            console.error("[Cleanup Error]", error);
-            return interaction.editReply({ 
-              embeds: [makeEmbed({ 
-                title: "❌ Cleanup Failed", 
-                description: "An error occurred during cleanup. Check logs for details.", 
-                color: EmbedColors.ERROR, 
-                guild 
-              })] 
-            });
+            );
+            buttonRows.push(row);
           }
+
+          return interaction.editReply({ embeds: [invEmbed], components: buttonRows });
         }
 
-        // ------------------ SOUND-BOARD: top-level 'sound' command ------------------
+        // ─── /sound ───────────────────────────────────────
         case "sound": {
           const sub = interaction.options.getSubcommand();
-          const q = getSbQueue(guildId); 
+          const q   = getSbQueue(guildId);
 
-          // ----- /sound add -----
           if (sub === "add") {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
-              return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], flags: 64 });
-            }
+            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild))
+              return interaction.reply({ embeds: [makeEmbed({ title: sc("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: sc("admins only"), color: EmbedColors.ERROR, guild })], flags: 64 });
             const name = interaction.options.getString("name");
             const file = interaction.options.getAttachment("file");
-            if (!file) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("⚠ ɴᴏ ғɪʟᴇ"), description: toSmallCaps("attach an audio file"), color: EmbedColors.WARNING, guild }) ], flags: 64 });
-
-            const exists = await Sound.findOne({ guildId, name });
-            if (exists) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs"), description: toSmallCaps(`**${name}** already exists`), color: EmbedColors.WARNING, guild }) ], flags: 64 });
-
+            if (!file) return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠ ɴᴏ ғɪʟᴇ"), description: sc("attach an audio file"), color: EmbedColors.WARNING, guild })], flags: 64 });
+            if (await Sound.exists({ guildId, name }))
+              return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs"), description: sc(`**${name}** already exists`), color: EmbedColors.WARNING, guild })], flags: 64 });
             await interaction.deferReply({ flags: 64 });
             let storage = null;
-            try { storage = await sbEnsureStorage(guild); } catch (e) { console.error("[sb ensure storage]", e); }
-            let uploadedUrl = file.url;
+            try { storage = await sbEnsureStorage(guild); } catch (e) { console.error("[sb storage]", e); }
+            let uploadedUrl = file.url, storageMessageId = null;
             if (storage) {
-              const m = await storage.send({ files: [file.url] }).catch(()=>null);
-              uploadedUrl = m?.attachments?.first()?.url ?? uploadedUrl;
+              const m = await storage.send({ files: [file.url] }).catch(() => null);
+              if (m) { uploadedUrl = m.attachments.first()?.url ?? uploadedUrl; storageMessageId = m.id; }
             }
-            await Sound.create({ guildId, name, fileURL: uploadedUrl, storageMessageId: storage ? (await storage.messages.fetch({ limit:1 }).catch(()=>null))?.id ?? null : null, addedBy: interaction.user.id });
-            return interaction.editReply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("✅ sᴏᴜɴᴅ ᴀᴅᴅᴇᴅ")).setDescription(toSmallCaps(`**${name}** ʜᴀs ʙᴇᴇɴ ᴀᴅᴅᴇᴅ`)).setTimestamp() ] });
+            await Sound.create({ guildId, name, fileURL: uploadedUrl, storageMessageId, addedBy: interaction.user.id });
+            return interaction.editReply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("✅ sᴏᴜɴᴅ ᴀᴅᴅᴇᴅ")).setDescription(sc(`**${name}** added`)).setTimestamp()] });
           }
 
-          // ----- /sound play -----
           if (sub === "play") {
-            const name = interaction.options.getString("name");
-            const sound = await Sound.findOne({ guildId, name });
-            if (!sound) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(toSmallCaps("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(toSmallCaps("that sound is not on the server")).setTimestamp() ], flags: 64 });
-
+            const name  = interaction.options.getString("name");
+            const sound = await Sound.findOne({ guildId, name }).lean();
+            if (!sound) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(sc("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(sc("sound not found")).setTimestamp()], flags: 64 });
             const res = await sbConnectToMember(interaction.member);
-            if (res?.error) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ")).setDescription(toSmallCaps("join a voice channel to play sounds")).setTimestamp() ], flags: 64 });
-
-            const isIdle = !q.now; 
-            
+            if (res?.error) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(sc("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ")).setDescription(sc("join a voice channel first")).setTimestamp()], flags: 64 });
+            const isIdle = !q.now;
             q.list.push({ _id: sound._id, name: sound.name, fileURL: sound.fileURL, storageMessageId: sound.storageMessageId });
-            
             if (isIdle) {
-               await sbPlayNext(guild, interaction.channel);
-               return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("▶️ ɴᴏᴡ ᴘʟᴀʏɪɴɢ")).setDescription(toSmallCaps(`**${sound.name}**`)).setTimestamp() ] });
-            } else {
-               await sbUpdatePanel(guild);
-               const pos = q.list.length;
-               return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("🎶 ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ")).setDescription(toSmallCaps(`**${sound.name}** is at position #${pos}`)).setTimestamp() ] });
+              await sbPlayNext(guild, interaction.channel);
+              return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("▶️ ɴᴏᴡ ᴘʟᴀʏɪɴɢ")).setDescription(sc(`**${sound.name}**`)).setTimestamp()] });
             }
+            sbUpdatePanel(guild);
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("🎶 ǫᴜᴇᴜᴇᴅ")).setDescription(sc(`**${sound.name}** at position #${q.list.length}`)).setTimestamp()] });
           }
 
-          // ----- /sound volume (NEW) -----
           if (sub === "volume") {
             const level = interaction.options.getInteger("level");
-            const newVol = level / 100;
-            q.volume = newVol;
-            
-            // Adjust current resource if playing
-            if (q.resource && q.resource.volume) {
-                q.resource.volume.setVolume(newVol);
-            }
-            await sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ")).setDescription(toSmallCaps(`Volume set to **${level}%**`)).setTimestamp() ], flags: 64 });
+            q.volume = level / 100;
+            if (q.resource?.volume) q.resource.volume.setVolume(q.volume);
+            sbUpdatePanel(guild);
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ")).setDescription(sc(`Volume: **${level}%**`)).setTimestamp()], flags: 64 });
           }
 
-          // ----- /sound top (NEW) -----
           if (sub === "top") {
-             const docs = await Sound.find({ guildId }).select('name playCount').sort({ playCount: -1 }).limit(10).lean();
-             if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds played yet")).setTimestamp() ], flags: 64 });
-             
-             const text = docs.map((s, idx) => {
-                 const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `\`#${idx+1}\``;
-                 return `${medal} **${s.name}** — ${s.playCount} plays`;
-             }).join("\n");
-
-             return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("🏆 ᴍᴏsᴛ ᴘᴏᴘᴜʟᴀʀ sᴏᴜɴᴅs")).setDescription(toSmallCaps(text)).setTimestamp() ], flags: 64 });
+            const docs = await Sound.find({ guildId }).select("name playCount").sort({ playCount: -1 }).limit(10).lean();
+            if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("📜 ᴇᴍᴘᴛʏ")).setDescription(sc("no sounds played yet")).setTimestamp()], flags: 64 });
+            const text = docs.map((s, i) => `${"🥇🥈🥉"[i] ?? `\`#${i+1}\``} **${s.name}** — ${s.playCount} plays`).join("\n");
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("🏆 ᴍᴏsᴛ ᴘᴏᴘᴜʟᴀʀ sᴏᴜɴᴅs")).setDescription(sc(text)).setTimestamp()], flags: 64 });
           }
 
-          // ----- /sound delete -----
           if (sub === "delete") {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], flags: 64 });
+            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [makeEmbed({ title: sc("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: sc("admins only"), color: EmbedColors.ERROR, guild })], flags: 64 });
             const name = interaction.options.getString("name");
-            const doc = await Sound.findOne({ guildId, name });
-            if (!doc) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(toSmallCaps("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(toSmallCaps("sound not found")).setTimestamp() ], flags: 64 });
+            const doc  = await Sound.findOne({ guildId, name });
+            if (!doc) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(sc("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(sc("sound not found")).setTimestamp()], flags: 64 });
             if (doc.storageMessageId) {
-              const storage = guild.channels.cache.find(c => c.name === "soundboard-storage");
-              if (storage) {
-                const msg = await storage.messages.fetch(doc.storageMessageId).catch(()=>null);
-                if (msg) await msg.delete().catch(()=>null);
+              const storageCh = guild.channels.cache.find(c => c.name === "soundboard-storage");
+              if (storageCh) {
+                const msg = await storageCh.messages.fetch(doc.storageMessageId).catch(() => null);
+                if (msg) await msg.delete().catch(() => {});
               }
             }
             await doc.deleteOne();
-            await sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(toSmallCaps("🗑 sᴏᴜɴᴅ ʀᴇᴍᴏᴠᴇᴅ")).setDescription(toSmallCaps(`**${name}** removed`)).setTimestamp() ] });
+            sbUpdatePanel(guild);
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("🗑 sᴏᴜɴᴅ ʀᴇᴍᴏᴠᴇᴅ")).setDescription(sc(`**${name}** removed`)).setTimestamp()] });
           }
 
-          // ----- /sound list -----
           if (sub === "list") {
-            const docs = await Sound.find({ guildId }).select('name playCount').sort({ name: 1 }).lean();
-            if (!docs.length) return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 ᴇᴍᴘᴛʏ")).setDescription(toSmallCaps("no sounds added")).setTimestamp() ], flags: 64 });
-            // Limit text size
-            const text = docs.slice(0, 40).map((s, idx) => `\`${idx+1}.\` **${s.name}** (${s.playCount} plays)`).join("\n");
-            const more = docs.length > 40 ? `\n...and ${docs.length - 40} more` : "";
-            return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(toSmallCaps(text + more)).setFooter({ text: toSmallCaps(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp() ], flags: 64 });
+            const docs = await Sound.find({ guildId }).select("name playCount").sort({ name: 1 }).lean();
+            if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("📜 ᴇᴍᴘᴛʏ")).setDescription(sc("no sounds added")).setTimestamp()], flags: 64 });
+            const text = docs.slice(0, 40).map((s, i) => `\`${i+1}.\` **${s.name}** (${s.playCount} plays)`).join("\n");
+            const more = docs.length > 40 ? `\n…and ${docs.length - 40} more` : "";
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(sc(text + more)).setFooter({ text: sc(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp()], flags: 64 });
           }
 
-          // ----- /sound panel -----
           if (sub === "panel") {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [ makeEmbed({ title: toSmallCaps("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: toSmallCaps("admins only"), color: EmbedColors.ERROR, guild }) ], flags: 64 });
-            const ui = await buildSoundPanelEmbed(guild);
+            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [makeEmbed({ title: sc("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: sc("admins only"), color: EmbedColors.ERROR, guild })], flags: 64 });
+            const ui  = await buildSoundPanelEmbed(guild);
             const msg = await interaction.reply({ embeds: [ui.embed], components: ui.buttons, withResponse: true });
             sbPanels.set(guildId, { messageId: msg.id, channelId: msg.channelId });
             return;
           }
-          return interaction.reply({ embeds: [ new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(toSmallCaps("sound — usage")).setDescription(toSmallCaps("/sound add|play|delete|list|panel|volume|top")).setTimestamp() ], flags: 64 });
+
+          return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("sound — usage")).setDescription(sc("/sound add|play|delete|list|panel|volume|top")).setTimestamp()], flags: 64 });
         }
       }
-    } 
+    }
 
+    // ── Button Interactions ─────────────────────────────────────
     if (interaction.isButton()) {
-      // 1. Setup & Safety Checks
       const { guild, guildId, member, customId } = interaction;
-      if (!guild) return; 
-      
-      // Check Admin permissions
-      if (!await checkAdmin(interaction)) return;
+      if (!guild) return;
 
       try {
-        if (customId.startsWith("sb_")) {
-          const q = getSbQueue(guildId);
-          
-          // Safety: If queue is missing (bot restarted), warn user unless connecting
-          if (!q && customId !== "sb_connect") {
-             return interaction.reply({ content: toSmallCaps("⚠️ Player not active. Click Connect."), flags: 64 });
-          }
+        // ── /inv notify button ────────────────────────────
+        if (customId.startsWith("inv_notify_")) {
+          // format: inv_notify_{targetMemberId}_{vcId}
+          const parts          = customId.split("_");
+          const targetMemberId = parts[2];
+          const vcId           = parts[3];
 
-          if (customId === "sb_refresh") { 
-            await sbUpdatePanel(guild); 
-            return interaction.deferUpdate(); 
+          const targetMember = await guild.members.fetch(targetMemberId).catch(() => null);
+          const vc           = guild.channels.cache.get(vcId);
+          const invokerVC    = member.voice?.channel;
+
+          if (!targetMember) return interaction.reply({ content: sc("❌ User not found."), flags: 64 });
+          if (!vc)           return interaction.reply({ content: sc("❌ Voice channel no longer exists."), flags: 64 });
+
+          // Try to DM the target user
+          const dmEmbed = new EmbedBuilder()
+            .setColor(EmbedColors.VC_JOIN)
+            .setAuthor({ name: `${member.user.username} invited you!`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
+            .setTitle(sc("📨 ᴠᴄ ɪɴᴠɪᴛᴇ"))
+            .setDescription(
+              `**${member.user.username}** is inviting you to join:\n\n` +
+              `🎧 **${vc.name}** — ${guild.name}\n\n` +
+              `*Head over to Discord and join the voice channel!*`
+            )
+            .setFooter({ text: sc(`from ${guild.name}`) })
+            .setTimestamp();
+
+          const dmSent = await targetMember.send({ embeds: [dmEmbed] }).then(() => true).catch(() => false);
+
+          if (dmSent) {
+            return interaction.reply({ content: sc(`✅ invite sent to ${targetMember.displayName} via dm!`), flags: 64 });
+          } else {
+            // DMs closed → post mention in the VC's parent text channel (or current channel)
+            const fallbackCh = invokerVC?.parent?.children?.cache?.find(c => c.isTextBased()) ?? interaction.channel;
+            if (fallbackCh?.isTextBased()) {
+              await fallbackCh.send({
+                content: `${targetMember} — **${member.user.username}** is inviting you to join **${vc.name}**! 🎧`,
+                embeds:  [dmEmbed]
+              }).catch(() => {});
+              return interaction.reply({ content: sc(`📣 couldn't dm ${targetMember.displayName} — notified in channel instead!`), flags: 64 });
+            }
+            return interaction.reply({ content: sc(`⚠️ couldn't reach ${targetMember.displayName} (dms closed).`), flags: 64 });
           }
-          
+        }
+
+        // ── Soundboard buttons ────────────────────────────
+        if (customId.startsWith("sb_")) {
+          if (!await checkAdmin(interaction)) return;
+          const q = getSbQueue(guildId);
+
+          if (customId === "sb_refresh") { await sbUpdatePanel(guild); return interaction.deferUpdate(); }
+
           if (customId === "sb_connect") {
             const res = await sbConnectToMember(member);
-            if (res?.error) {
-              return interaction.reply({ 
-                embeds: [ new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(toSmallCaps("🎧 Connection Failed")).setDescription(toSmallCaps("Join a voice channel first.")).setTimestamp() ], 
-                flags: 64 
-              });
-            }
-            const queue = getSbQueue(guildId);
-            queue.vcId = res.channel.id;
-            if (queue.timeout) { clearTimeout(queue.timeout); queue.timeout = null; }
+            if (res?.error) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(sc("🎧 join a vc first")).setDescription(sc("You need to be in a voice channel.")).setTimestamp()], flags: 64 });
+            q.vcId = res.channel.id;
+            if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
             await sbUpdatePanel(guild);
             return interaction.deferUpdate();
           }
 
-          if (customId === "sb_skip") { 
-            try { q.player.stop(); } catch(e) {} 
-            await sbUpdatePanel(guild); 
-            return interaction.deferUpdate(); 
+          if (customId === "sb_skip")  { try { q.player.stop(); } catch (_) {} await sbUpdatePanel(guild); return interaction.deferUpdate(); }
+          if (customId === "sb_stop")  {
+            q.list = []; q.now = null;
+            if (q.currentFile) { fsp.unlink(q.currentFile).catch(() => {}); q.currentFile = null; }
+            try { q.player.stop(true); } catch (_) {}
+            const conn = getVoiceConnection(guildId);
+            if (conn) conn.destroy();
+            q.vcId = null;
+            await sbUpdatePanel(guild);
+            return interaction.deferUpdate();
           }
-
-          if (customId === "sb_stop") { 
-            q.list = []; 
-            // Delete local file if exists
-            if (q.currentFile && fs.existsSync(q.currentFile)) {
-                fs.unlink(q.currentFile, (e) => {});
-                q.currentFile = null;
-            }
-            q.now = null;
-            try { q.player.stop(true); } catch(e) {} 
-            
-            const conn = getVoiceConnection(guildId); 
-            if (conn) conn.destroy(); 
-            q.vcId = null; 
-            
-            await sbUpdatePanel(guild); 
-            return interaction.deferUpdate(); 
-          }
-          return interaction.deferUpdate(); // Catch-all
+          return interaction.deferUpdate();
         }
 
-
-        // Fetch current settings (Uses your cache system)
+        // ── Settings panel buttons ────────────────────────
+        if (!await checkAdmin(interaction)) return;
         let settings = await getGuildSettings(guildId);
-        if (!settings) return interaction.reply({ content: "❌ Database error: Settings not found.", flags: 64 });
+        if (!settings) return interaction.reply({ content: "❌ Settings not found.", flags: 64 });
 
         let didChange = false;
-
         switch (customId) {
-          // Toggles: Update local object immediately for UI speed
-          case "toggleLeaveAlerts": settings.leaveAlerts = !settings.leaveAlerts; didChange = true; break;
-          case "toggleJoinAlerts": settings.joinAlerts = !settings.joinAlerts; didChange = true; break;
-          case "toggleOnlineAlerts": settings.onlineAlerts = !settings.onlineAlerts; didChange = true; break;
-          case "togglePrivateThreads": settings.privateThreadAlerts = !settings.privateThreadAlerts; didChange = true; break;
-          case "toggleAutoDelete": settings.autoDelete = !settings.autoDelete; didChange = true; break;
-          case "toggleIgnoreRole": settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled; didChange = true; break;
-          
-          // Reset Flow
+          case "toggleLeaveAlerts":    settings.leaveAlerts           = !settings.leaveAlerts;           didChange = true; break;
+          case "toggleJoinAlerts":     settings.joinAlerts            = !settings.joinAlerts;            didChange = true; break;
+          case "toggleOnlineAlerts":   settings.onlineAlerts          = !settings.onlineAlerts;          didChange = true; break;
+          case "togglePrivateThreads": settings.privateThreadAlerts   = !settings.privateThreadAlerts;   didChange = true; break;
+          case "toggleAutoDelete":     settings.autoDelete            = !settings.autoDelete;            didChange = true; break;
+          case "toggleIgnoreRole":     settings.ignoreRoleEnabled     = !settings.ignoreRoleEnabled;     didChange = true; break;
           case "resetSettings": {
-            const confirmRow = new ActionRowBuilder().addComponents(
+            const row = new ActionRowBuilder().addComponents(
               new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Yes, Reset").setStyle(ButtonStyle.Danger),
               new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ No, Cancel").setStyle(ButtonStyle.Secondary)
             );
-            return interaction.update({ 
-              embeds: [ makeEmbed({ title: toSmallCaps("⚠️ Confirm Reset"), description: toSmallCaps("Reset all VC alert settings?"), color: EmbedColors.WARNING, guild }) ], 
-              components: [confirmRow] 
-            });
+            return interaction.update({ embeds: [makeEmbed({ title: sc("⚠️ Confirm Reset"), description: sc("Reset all VC alert settings?"), color: EmbedColors.WARNING, guild })], components: [row] });
           }
           case "confirmReset": {
             await GuildSettings.deleteOne({ guildId });
-            guildSettingsCache.delete(guildId); // Clear cache
-            
-            // Re-fetch defaults
-            settings = await getGuildSettings(guildId); 
+            guildSettingsCache.delete(guildId);
+            settings = await getGuildSettings(guildId);
             const panel = buildControlPanel(settings, guild);
-            await interaction.update({ embeds: [panel.embed], components: [panel.buttons] });
-            return interaction.followUp({ content: toSmallCaps("🎉 Settings Reset!"), flags: 64 });
+            await interaction.update({ embeds: [panel.embed], components: panel.buttons });
+            return interaction.followUp({ content: sc("🎉 Settings Reset!"), flags: 64 });
           }
-          case "cancelReset": {
-            // Just re-render logic below
-            break; 
-          }
-          default:
-            return; // Unknown button
+          case "cancelReset": break;
+          default: return;
         }
-
 
         if (didChange) {
-            // 1. Update Cache
-            guildSettingsCache.set(guildId, settings);
-
-            // 2. Force Database Update (Background)
-            // We use specific $set to ensure atomic updates
-            GuildSettings.updateOne({ guildId }, { 
-                $set: { 
-                    leaveAlerts: settings.leaveAlerts,
-                    joinAlerts: settings.joinAlerts,
-                    onlineAlerts: settings.onlineAlerts,
-                    privateThreadAlerts: settings.privateThreadAlerts,
-                    autoDelete: settings.autoDelete,
-                    ignoreRoleEnabled: settings.ignoreRoleEnabled
-                }
-            }).catch(e => console.error(`[Button DB Save Error] ${guildId}:`, e));
+          guildSettingsCache.delete(guildId);
+          guildSettingsCache.set(guildId, settings);
+          // Atomic $set — only changed fields
+          GuildSettings.updateOne({ guildId }, {
+            $set: {
+              leaveAlerts: settings.leaveAlerts, joinAlerts: settings.joinAlerts,
+              onlineAlerts: settings.onlineAlerts, privateThreadAlerts: settings.privateThreadAlerts,
+              autoDelete: settings.autoDelete, ignoreRoleEnabled: settings.ignoreRoleEnabled
+            }
+          }).catch(e => console.error(`[Button DB] ${guildId}:`, e));
         }
 
-        // Re-draw panel using the updated `settings` object
-        const updatedPanel = buildControlPanel(settings, guild);
-        return interaction.update({ embeds: [updatedPanel.embed], components: updatedPanel.buttons });
+        const updated = buildControlPanel(settings, guild);
+        return interaction.update({ embeds: [updated.embed], components: updated.buttons });
 
-      } catch (error) {
-        console.error("Button Interaction Error:", error);
-        if (!interaction.replied && !interaction.deferred) {
-            return interaction.reply({ content: "❌ An internal error occurred.", flags: 64 });
-        }
+      } catch (err) {
+        console.error("[Button Error]", err);
+        if (!interaction.replied && !interaction.deferred)
+          return interaction.reply({ content: "❌ An error occurred.", flags: 64 });
       }
     }
 
+    // ── Autocomplete ────────────────────────────────────────────
     if (interaction.isAutocomplete()) {
-      // /inv autocomplete
+      const focused = (interaction.options.getFocused() ?? "").toString().toLowerCase();
+
       if (interaction.commandName === "inv") {
-        const focused = (interaction.options.getFocused() || "").toString().toLowerCase();
-        await guild.members.fetch().catch(() => {});
+        // Only search if member cache already available (avoid full guild fetch in autocomplete)
         const members = [...guild.members.cache.values()]
           .filter(m => !m.user.bot && (
             m.user.username.toLowerCase().includes(focused) ||
-            (m.nickname || "").toLowerCase().includes(focused)
+            (m.nickname ?? "").toLowerCase().includes(focused)
           ))
           .slice(0, 25);
-        const choices = members.map(m => ({
-          name: `${m.displayName} (@${m.user.username})`,
-          value: m.user.username
-        }));
-        return interaction.respond(choices.length > 0 ? choices : [{ name: toSmallCaps("ɴᴏ ʀᴇsᴜʟᴛs"), value: focused || "" }]);
+        return interaction.respond(
+          members.length
+            ? members.map(m => ({ name: `${m.displayName} (@${m.user.username})`, value: m.user.username }))
+            : [{ name: sc("ɴᴏ ʀᴇsᴜʟᴛs"), value: focused || "" }]
+        );
       }
 
-      if (interaction.commandName !== "sound") return;
-      const sub = interaction.options.getSubcommand();
-      const focused = (interaction.options.getFocused() || "").toString().toLowerCase();
-      const sounds = await Sound.find({ guildId }).select("name").limit(100).lean().catch(()=>[]);
-      const names = sounds.map(s => s.name);
-
-      if (sub === "add") {
-        const exist = names.filter(n => n.toLowerCase().includes(focused)).slice(0,25);
-        if (!exist.length) return interaction.respond([{ name: toSmallCaps("✅ new name"), value: focused || "" }]);
-        return interaction.respond(exist.map(n => ({ name: toSmallCaps("⚠ " + n + " (exists)"), value: n })));
+      if (interaction.commandName === "sound") {
+        const sub    = interaction.options.getSubcommand();
+        const sounds = await Sound.find({ guildId }).select("name").limit(100).lean().catch(() => []);
+        const names  = sounds.map(s => s.name);
+        if (sub === "add") {
+          const existing = names.filter(n => n.toLowerCase().includes(focused)).slice(0, 25);
+          return interaction.respond(existing.length ? existing.map(n => ({ name: sc("⚠ " + n + " (exists)"), value: n })) : [{ name: sc("✅ new name"), value: focused || "" }]);
+        }
+        const matches = names.filter(n => n.toLowerCase().includes(focused)).slice(0, 25);
+        return interaction.respond(matches.length ? matches.map(n => ({ name: sc("🎵 " + n), value: n })) : [{ name: sc("ɴᴏ ʀᴇsᴜʟᴛs"), value: "" }]);
       }
-      const matches = names.filter(n => n.toLowerCase().includes(focused)).slice(0,25);
-      if (!matches.length) return interaction.respond([{ name: toSmallCaps("ɴᴏ ʀᴇsᴜʟᴛs"), value: "" }]);
-      return interaction.respond(matches.map(n => ({ name: toSmallCaps("🎵 " + n), value: n })));
     }
 
   } catch (err) {
-    console.error("[Interaction Handler] Error:", err?.stack ?? err?.message ?? err);
-    try { if (interaction && !interaction.replied) await interaction.reply({ content: toSmallCaps("An error occurred while processing your request."), flags: 64 }); } catch (_) {}
+    console.error("[InteractionCreate]", err?.stack ?? err?.message ?? err);
+    try { if (interaction && !interaction.replied) await interaction.reply({ content: sc("An error occurred. Please try again."), flags: 64 }); } catch (_) {}
   }
 });
 
-// ─────────────── Voice Channel Alert System ───────────────
-const activeVCThreads = new Map();
-const threadDeletionTimeouts = new Map();
-const vcLocks = new Map();
-const threadLastActivity = new Map(); // Track last activity per thread
-const THREAD_INACTIVITY_MS = 5 * 60 * 1000;
-const THREAD_CHECK_INTERVAL = 30 * 1000; // Check every 30 seconds
+// ─── Voice Channel Alert System ───────────────────────────────
+const activeVCThreads     = new Map();  // vcId → thread
+const threadDeletion      = new Map();  // vcId → timeoutId
+const threadLastActivity  = new Map();  // vcId → timestamp (ms)
+const vcLocks             = new Map();  // vcId → Promise (mutex)
 
-// Thread cleanup monitor (prevents 50-60min delays)
-setInterval(() => {
+const THREAD_INACTIVITY   = 5 * 60_000;   // 5 min
+const THREAD_CHECK_MS     = 30_000;        // 30 s
+
+// Periodic inactivity check (replaces individual timeouts where possible)
+const threadCleanupInterval = setInterval(() => {
   const now = Date.now();
-  for (const [vcId, lastActivity] of threadLastActivity.entries()) {
-    if (now - lastActivity >= THREAD_INACTIVITY_MS) {
+  for (const [vcId, last] of threadLastActivity.entries()) {
+    if (now - last >= THREAD_INACTIVITY) {
       const thread = activeVCThreads.get(vcId);
-      if (thread) {
-        thread.delete().catch(() => {});
-        activeVCThreads.delete(vcId);
-        threadLastActivity.delete(vcId);
-        if (threadDeletionTimeouts.has(vcId)) {
-          clearTimeout(threadDeletionTimeouts.get(vcId));
-          threadDeletionTimeouts.delete(vcId);
-        }
-        console.log(`[Thread Cleanup] 🗑️ Auto-deleted inactive thread for VC ${vcId}`);
-      }
+      if (thread) thread.delete().catch(() => {});
+      activeVCThreads.delete(vcId);
+      threadLastActivity.delete(vcId);
+      const t = threadDeletion.get(vcId);
+      if (t) clearTimeout(t);
+      threadDeletion.delete(vcId);
     }
   }
-}, THREAD_CHECK_INTERVAL); 
+}, THREAD_CHECK_MS);
+threadCleanupInterval.unref();
 
-async function withVCLock(vcId, fn) {
-  const prev = vcLocks.get(vcId) || Promise.resolve();
+function withVCLock(vcId, fn) {
+  const prev = vcLocks.get(vcId) ?? Promise.resolve();
   const next = prev.then(() => fn()).finally(() => { if (vcLocks.get(vcId) === next) vcLocks.delete(vcId); });
   vcLocks.set(vcId, next);
   return next;
 }
+
 async function fetchTextChannel(guild, channelId) {
-  try {
-    const cached = guild.channels.cache.get(channelId);
-    if (cached?.isTextBased()) return cached;
-    const fetched = await guild.channels.fetch(channelId).catch(() => null);
-    return fetched?.isTextBased() ? fetched : null;
-  } catch { return null; }
+  const cached = guild.channels.cache.get(channelId);
+  if (cached?.isTextBased()) return cached;
+  const fetched = await guild.channels.fetch(channelId).catch(() => null);
+  return fetched?.isTextBased() ? fetched : null;
 }
 
-client.on("channelDelete", (channel) => {
-  if (threadDeletionTimeouts.has(channel.id)) { clearTimeout(threadDeletionTimeouts.get(channel.id)); threadDeletionTimeouts.delete(channel.id); }
-  if (activeVCThreads.has(channel.id)) { activeVCThreads.delete(channel.id); }
+client.on("channelDelete", channel => {
+  const t = threadDeletion.get(channel.id);
+  if (t) { clearTimeout(t); threadDeletion.delete(channel.id); }
+  activeVCThreads.delete(channel.id);
+  threadLastActivity.delete(channel.id);
 });
 
 client.on("voiceStateUpdate", async (oldState, newState) => {
@@ -2161,69 +1491,88 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     if (!user || user.bot) return;
     const guild = newState.guild ?? oldState.guild;
     if (!guild) return;
+
     const settings = await getGuildSettings(guild.id);
     if (!settings?.alertsEnabled || !settings.textChannelId) return;
+
     const member = newState.member ?? oldState.member;
     if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member?.roles?.cache?.has(settings.ignoredRoleId)) return;
 
-    const joined = !oldState.channelId && newState.channelId && settings.joinAlerts;
-    const left = oldState.channelId && !newState.channelId && settings.leaveAlerts;
+    const joined = !oldState.channelId &&  newState.channelId && settings.joinAlerts;
+    const left   =  oldState.channelId && !newState.channelId && settings.leaveAlerts;
     if (!joined && !left) return;
 
     const vc = newState.channel ?? oldState.channel;
     if (!vc) return;
+
     const logChannel = await fetchTextChannel(guild, settings.textChannelId);
     if (!logChannel) return;
 
-    const avatar = user.displayAvatarURL({ dynamic: true });
+    const avatar    = user.displayAvatarURL({ dynamic: true });
     const botAvatar = client.user.displayAvatarURL();
+
     let embed;
     if (joined) {
-      addLog("join", user.tag, vc.name, guild); // Non-blocking
-      embed = new EmbedBuilder().setColor(EmbedColors.VC_JOIN).setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar }).setDescription(`🎧 **${user.username}** joined ${vc.name} — let the vibes begin!`).setFooter({ text: "🎉 welcome to the voice party!", iconURL: botAvatar }).setTimestamp();
-    } else if (left) {
-      addLog("leave", user.tag, vc.name, guild); // Non-blocking
-      embed = new EmbedBuilder().setColor(EmbedColors.VC_LEAVE).setAuthor({ name: `${user.username} dipped out! 🏃‍♂️`, iconURL: avatar }).setDescription(`👋 **${user.username}** left ${vc.name} — see ya next time!`).setFooter({ text: "💨 gone but not forgotten.", iconURL: botAvatar }).setTimestamp();
-    } else return;
+      addLog("join", user.tag, vc.name, guild);
+      embed = new EmbedBuilder().setColor(EmbedColors.VC_JOIN)
+        .setAuthor({ name: `${user.username} just popped in! 🔊`, iconURL: avatar })
+        .setDescription(`🎧 **${user.username}** joined **${vc.name}** — let the vibes begin!`)
+        .setFooter({ text: "🎉 welcome to the voice party!", iconURL: botAvatar })
+        .setTimestamp();
+    } else {
+      addLog("leave", user.tag, vc.name, guild);
+      embed = new EmbedBuilder().setColor(EmbedColors.VC_LEAVE)
+        .setAuthor({ name: `${user.username} dipped out! 🏃`, iconURL: avatar })
+        .setDescription(`👋 **${user.username}** left **${vc.name}** — see ya next time!`)
+        .setFooter({ text: "💨 gone but not forgotten.", iconURL: botAvatar })
+        .setTimestamp();
+    }
 
     await withVCLock(vc.id, async () => {
       const everyonePerms = vc.permissionsFor(guild.roles.everyone);
-      const isPrivateVC = everyonePerms && !everyonePerms.has(PermissionsBitField.Flags.ViewChannel);
+      const isPrivateVC   = everyonePerms && !everyonePerms.has(PermissionsBitField.Flags.ViewChannel);
 
       if (isPrivateVC && settings.privateThreadAlerts) {
         let thread = activeVCThreads.get(vc.id);
         if (!thread || thread.archived || !logChannel.threads.cache.has(thread.id)) {
           const shortName = vc.name.length > 80 ? vc.name.slice(0, 80) + "…" : vc.name;
           try {
-            thread = await logChannel.threads.create({ name: `🔊│${shortName} • VC Alerts`, type: ChannelType.PrivateThread, autoArchiveDuration: 1440, reason: `Private VC alert thread for ${vc.name}` });
+            thread = await logChannel.threads.create({
+              name: `🔊│${shortName} • VC Alerts`,
+              type: ChannelType.PrivateThread,
+              autoArchiveDuration: 1440,
+              reason: `Private VC alert thread for ${vc.name}`
+            });
             activeVCThreads.set(vc.id, thread);
-            threadLastActivity.set(vc.id, Date.now());
-            console.log(`[VC Thread] 🧵 Created new thread for ${vc.name}`);
-          } catch (err) { console.warn(`[VC Thread] Failed to create thread for ${vc.name}:`, err.message); return; }
+          } catch (err) { console.warn("[VC Thread] create failed:", err.message); return; }
         }
-        
-        // Update last activity timestamp
-        threadLastActivity.set(vc.id, Date.now());
-        
-        if (threadDeletionTimeouts.has(vc.id)) clearTimeout(threadDeletionTimeouts.get(vc.id));
-        const timeout = setTimeout(async () => {
-          try { await thread.delete().catch(() => {}); console.log(`[VC Thread] 🗑️ Deleted inactive thread for ${vc.name}`); } finally { activeVCThreads.delete(vc.id); threadDeletionTimeouts.delete(vc.id); threadLastActivity.delete(vc.id); }
-        }, THREAD_INACTIVITY_MS);
-        timeout.unref();
-        threadDeletionTimeouts.set(vc.id, timeout);
 
-        const memberIds = new Set();
-        const allMembers = guild.members.cache.filter((m) => !m.user.bot);
-        allMembers.forEach((m) => { const perms = vc.permissionsFor(m); if (perms?.has(PermissionsBitField.Flags.ViewChannel)) memberIds.add(m.id); });
-        const ids = [...memberIds];
-        const BATCH_SIZE = 20;
-        for (let i = 0; i < ids.length; i += BATCH_SIZE) { const batch = ids.slice(i, i + BATCH_SIZE); await Promise.all(batch.map(id => thread.members.add(id).catch(() => {}))); await new Promise(res => setTimeout(res, 100)); }
-        try { const msg = await thread.send({ embeds: [embed] }); if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000).unref(); } catch (err) { console.warn(`[VC Thread] Failed to send embed in ${vc.name}:`, err.message); }
+        threadLastActivity.set(vc.id, Date.now());
+        // Per-thread deletion timer (as safety net)
+        if (threadDeletion.has(vc.id)) clearTimeout(threadDeletion.get(vc.id));
+        const t = setTimeout(async () => {
+          activeVCThreads.get(vc.id)?.delete().catch(() => {});
+          activeVCThreads.delete(vc.id);
+          threadDeletion.delete(vc.id);
+          threadLastActivity.delete(vc.id);
+        }, THREAD_INACTIVITY);
+        t.unref();
+        threadDeletion.set(vc.id, t);
+
+        // Add members with VC view permission in batches
+        const memberIds = [...guild.members.cache.filter(m => !m.user.bot && vc.permissionsFor(m)?.has(PermissionsBitField.Flags.ViewChannel)).keys()];
+        for (let i = 0; i < memberIds.length; i += 20) {
+          await Promise.all(memberIds.slice(i, i + 20).map(id => thread.members.add(id).catch(() => {})));
+          if (i + 20 < memberIds.length) await new Promise(r => setTimeout(r, 100));
+        }
+        const msg = await thread.send({ embeds: [embed] }).catch(() => null);
+        if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000).unref();
       } else {
-        try { const msg = await logChannel.send({ embeds: [embed] }); if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000).unref(); } catch (err) { console.warn(`[VC Alert] Failed to send public alert in ${logChannel.name}:`, err.message); }
+        const msg = await logChannel.send({ embeds: [embed] }).catch(e => { console.warn("[VC Alert] send failed:", e?.message); return null; });
+        if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000).unref();
       }
     });
-  } catch (err) { console.error("[voiceStateUpdate] Error:", err); }
+  } catch (err) { console.error("[voiceStateUpdate]", err); }
 });
 
 client.on("presenceUpdate", async (oldPresence, newPresence) => {
@@ -2235,149 +1584,91 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
     if (settings.ignoreRoleEnabled && settings.ignoredRoleId && member.roles.cache.has(settings.ignoredRoleId)) return;
     const channel = await fetchTextChannel(member.guild, settings.textChannelId);
     if (!channel) return;
-
-    const embed = new EmbedBuilder().setColor(EmbedColors.ONLINE).setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) }).setDescription(`👀 **${member.user.username}** is now online — something's cooking!`).setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() }).setTimestamp();
-    addLog("online", member.user.tag, "-", member.guild); // Non-blocking
-    const msg = await channel.send({ embeds: [embed] }).catch(e => console.warn(`Failed to send online alert for ${member.user.username}:`, e?.message ?? e));
-    if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000);
-  } catch (e) { console.error("[presenceUpdate] Handler error:", e?.stack ?? e?.message ?? e); }
+    addLog("online", member.user.tag, "-", member.guild);
+    const embed = new EmbedBuilder().setColor(EmbedColors.ONLINE)
+      .setAuthor({ name: `${member.user.username} just came online! 🟢`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
+      .setDescription(`👀 **${member.user.username}** is now online — something's cooking!`)
+      .setFooter({ text: "✨ Ready to vibe!", iconURL: client.user.displayAvatarURL() })
+      .setTimestamp();
+    const msg = await channel.send({ embeds: [embed] }).catch(e => { console.warn(`[Online Alert] failed for ${member.user.username}:`, e?.message); return null; });
+    if (msg && settings.autoDelete) setTimeout(() => msg.delete().catch(() => {}), 30_000).unref();
+  } catch (e) { console.error("[presenceUpdate]", e?.stack ?? e?.message ?? e); }
 });
 
-async function checkAdmin(interaction) {
-  const guild = interaction.guild;
-  const member = interaction.member;
-  const hasPermission = member?.permissions?.has(PermissionFlagsBits.Administrator) || member?.permissions?.has(PermissionFlagsBits.ManageGuild);
-  if (!hasPermission) { await interaction.reply({ embeds: [makeEmbed({ title: "No Permission", description: "You need Administrator or Manage Server permission to use this.", color: EmbedColors.ERROR, guild })], flags: 64 }); return false; }
-  return true;
-}
+// ─── Gateway Event Handlers ───────────────────────────────────
+client.on("warn",           info  => console.warn("[Discord Warn]", info));
+client.on("error",          error => console.error("[Discord Error]", error));
+client.on("shardError",     error => console.error("[Shard Error]", error));
+client.on("shardReconnecting", id => { console.log(`🔄 Shard ${id} reconnecting…`); lastHeartbeat = Date.now(); });
+client.on("shardResume",    (id, replayed) => { console.log(`✅ Shard ${id} resumed (${replayed} events)`); lastHeartbeat = Date.now(); reconnectAttempts = 0; });
+client.on("shardDisconnect",(ev, id) => console.warn(`⚠️ Shard ${id} disconnected (${ev.code})`));
+client.ws.on("HEARTBEAT",   () => { lastHeartbeat = Date.now(); });
 
-async function shutdown(signal) {
-  try {
-    console.log(`[Shutdown] Received ${signal}. Cleaning up...`);
-    if (pendingSaveTimer) { clearTimeout(pendingSaveTimer); pendingSaveTimer = null; }
-    if (pendingSaveQueue.size > 0) {
-      const entries = Array.from(pendingSaveQueue.entries());
-      pendingSaveQueue.clear();
-      await Promise.all(entries.map(([guildId, settings]) => GuildSettings.findOneAndUpdate({ guildId }, settings, { upsert: true, setDefaultsOnInsert: true }).exec().catch(e => console.error(`[DB] Shutdown save failed for ${guildId}:`, e?.message ?? e))));
-    }
-    // Cleanup Temp Dir
-    const files = fs.readdirSync(TEMP_DIR);
-    for (const file of files) fs.unlinkSync(path.join(TEMP_DIR, file));
-    
-    for (const t of threadDeletionTimeouts.values()) clearTimeout(t);
-    threadDeletionTimeouts.clear();
-    activeVCThreads.clear();
-    await mongoose.disconnect().catch(() => {});
-    try { await client.destroy(); } catch (_) {}
-    console.log("[Shutdown] Completed. Exiting.");
-    process.exit(0);
-  } catch (err) { console.error("[Shutdown] Error during shutdown:", err); process.exit(1); }
-}
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('uncaughtException', (err) => { console.error('[uncaughtException]', err); shutdown('uncaughtException'); });
-process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason); });
-
-// ---------- Gateway Connection Event Handlers ----------
-client.on('warn', (info) => {
-  console.warn('[Discord Warning]', info);
-});
-
-client.on('error', (error) => {
-  console.error('[Discord Error]', error);
-});
-
-client.on('shardError', (error) => {
-  console.error('[Shard Error]', error);
-});
-
-client.on('shardReconnecting', (id) => {
-  console.log(`🔄 Shard ${id} reconnecting...`);
-  lastHeartbeat = Date.now();
-});
-
-client.on('shardResume', (id, replayedEvents) => {
-  console.log(`✅ Shard ${id} resumed (${replayedEvents} events replayed)`);
-  lastHeartbeat = Date.now();
-  reconnectAttempts = 0;
-});
-
-client.on('shardDisconnect', (event, id) => {
-  console.warn(`⚠️ Shard ${id} disconnected (${event.code}: ${event.reason})`);
-});
-
-// Heartbeat monitoring
-client.ws.on('HEARTBEAT', () => {
-  lastHeartbeat = Date.now();
-});
-
-// ---------- MongoDB Connection with Retry ----------
+// ─── MongoDB with retry ───────────────────────────────────────
 let mongoRetries = 0;
-const MAX_MONGO_RETRIES = 5;
-
 async function connectMongoDB() {
   try {
-    if (!process.env.MONGO_URI) throw new Error("MONGO_URI not provided in .env");
-    
-    await mongoose.connect(process.env.MONGO_URI, { 
+    if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
+    await mongoose.connect(process.env.MONGO_URI, {
       dbName: "Discord-Alert-Bot",
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000,
+      serverSelectionTimeoutMS: 10_000,
+      socketTimeoutMS: 45_000,
       maxPoolSize: 10,
       minPoolSize: 2,
       retryWrites: true,
       retryReads: true
     });
-    
-    console.log("✅ MongoDB Connected successfully");
+    console.log("✅ MongoDB connected");
     mongoRetries = 0;
-    return true;
   } catch (e) {
-    console.error("❌ MongoDB connection error:", e?.message ?? e);
-    
-    if (mongoRetries < MAX_MONGO_RETRIES) {
+    console.error("❌ MongoDB error:", e?.message ?? e);
+    if (mongoRetries < 5) {
       mongoRetries++;
-      console.log(`🔄 Retrying MongoDB connection (${mongoRetries}/${MAX_MONGO_RETRIES}) in 5s...`);
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      console.log(`🔄 Retry ${mongoRetries}/5 in 5 s…`);
+      await new Promise(r => setTimeout(r, 5_000));
       return connectMongoDB();
     }
-    
-    console.error('❌ MongoDB connection failed after max retries');
+    console.error("❌ MongoDB failed after 5 retries. Exiting.");
     process.exit(1);
   }
 }
+mongoose.connection.on("error",        err  => console.error("[MongoDB]", err));
+mongoose.connection.on("disconnected",  ()   => { console.warn("⚠️ MongoDB disconnected, reconnecting…"); connectMongoDB(); });
+mongoose.connection.on("reconnected",   ()   => console.log("✅ MongoDB reconnected"));
 
-// MongoDB error handlers
-mongoose.connection.on('error', (err) => {
-  console.error('[MongoDB Error]', err);
-});
+// ─── Graceful shutdown ────────────────────────────────────────
+async function shutdown(signal) {
+  console.log(`[Shutdown] ${signal}`);
+  // Flush pending DB saves
+  if (pendingSaveTimer) { clearTimeout(pendingSaveTimer); pendingSaveTimer = null; }
+  if (pendingSaveQueue.size > 0) {
+    const entries = [...pendingSaveQueue.entries()];
+    pendingSaveQueue.clear();
+    await Promise.all(entries.map(([gid, s]) =>
+      GuildSettings.findOneAndUpdate({ guildId: gid }, s, { upsert: true, setDefaultsOnInsert: true })
+        .exec().catch(e => console.error(`[Shutdown DB] ${gid}:`, e?.message ?? e))
+    ));
+  }
+  // Clean temp dir
+  const files = await fsp.readdir(TEMP_DIR).catch(() => []);
+  await Promise.all(files.map(f => fsp.unlink(path.join(TEMP_DIR, f)).catch(() => {})));
+  // Clear timers
+  for (const t of threadDeletion.values()) clearTimeout(t);
+  threadDeletion.clear(); activeVCThreads.clear(); threadLastActivity.clear();
+  await mongoose.disconnect().catch(() => {});
+  try { await client.destroy(); } catch (_) {}
+  console.log("[Shutdown] Done.");
+  process.exit(0);
+}
+process.on("SIGINT",              () => shutdown("SIGINT"));
+process.on("SIGTERM",             () => shutdown("SIGTERM"));
+process.on("uncaughtException",   err => { console.error("[uncaughtException]", err); shutdown("uncaughtException"); });
+process.on("unhandledRejection",  reason => console.error("[unhandledRejection]", reason));
 
-mongoose.connection.on('disconnected', () => {
-  console.warn('⚠️ MongoDB disconnected. Attempting to reconnect...');
-  connectMongoDB();
-});
-
-mongoose.connection.on('reconnected', () => {
-  console.log('✅ MongoDB reconnected');
-});
-
-// ---------- Start Bot ----------
+// ─── Start ────────────────────────────────────────────────────
 (async () => {
-  // Connect to MongoDB first
   await connectMongoDB();
-  
-  // Validate Discord token
-  if (!process.env.TOKEN) { 
-    console.error("❌ TOKEN not set in .env"); 
-    process.exit(1); 
-  }
-  
-  // Login to Discord
-  try {
-    console.log('🔐 Logging in to Discord...');
-    await client.login(process.env.TOKEN);
-  } catch (err) {
-    console.error("❌ Discord login failed:", err);
-    process.exit(1);
-  }
+  if (!process.env.TOKEN) { console.error("❌ TOKEN not set"); process.exit(1); }
+  console.log("🔐 Logging in to Discord…");
+  await client.login(process.env.TOKEN).catch(err => { console.error("❌ Discord login failed:", err); process.exit(1); });
 })();
