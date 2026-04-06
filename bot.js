@@ -1,16 +1,18 @@
 // ============================================================
-//  Discord VC Alert & Soundboard Bot  —  Optimized Build
-//  Improvements:
-//    • Reduced heap usage (LRU cache, weak refs, smaller Maps)
+//  Discord VC Alert & Soundboard Bot  —  Production Build
+//  Architecture:
+//    • Aggressive cache limiting (makeCache) for 40-50MB containers
+//    • No guild.members.fetch() — never loads full member list
+//    • activeVCThreads stores only threadId strings, not objects
+//    • sbQueues stores channel IDs, not channel objects
+//    • /inv: VC-aware candidate filtering without full-member loads
+//    • /inv: smart ranking (hidden for single target)
+//    • /inv: DM invite with actionable Join button + channel fallback
+//    • /inv: clean single-user and multi-user layouts
 //    • Batched debounced DB writes with $set projection
-//    • Removed dead code / limit option from /inv
-//    • /inv: VC detection → permission-filtered results
-//    • /inv: per-user invite button (DM notify or direct invite)
 //    • Async flows cleaned up, no fire-and-forget race conditions
 //    • Duplicate listener prevention on audio player & voice conn
-//    • Centralised error handler, no silent catches in hot paths
-//    • Temp-file cleanup on every track finish (not just Idle)
-//    • Thread-inactivity cleanup uses WeakRef-safe pattern
+//    • Temp-file cleanup on every track finish
 //    • setInterval heartbeat monitor improved
 //    • Auto-delete timers use unref() to avoid holding the loop
 // ============================================================
@@ -39,7 +41,8 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Events
+  Events,
+  Options
 } from "discord.js";
 
 import {
@@ -240,6 +243,19 @@ async function generateActivityFile(guild, logs) {
   return filePath;
 }
 
+// ─── /inv helpers (module-level, reused by command + autocomplete) ───────────
+
+/**
+ * Returns true if `member` can view and connect to `vc`.
+ * Uses only cached permission data — no network calls.
+ */
+function canInviteToVC(member, vc) {
+  try {
+    const p = vc.permissionsFor(member);
+    return !!(p?.has(PermissionFlagsBits.ViewChannel) && p?.has(PermissionFlagsBits.Connect));
+  } catch { return false; }
+}
+
 // ─── Embed helpers ────────────────────────────────────────────
 const EmbedColors = Object.freeze({
   SUCCESS: 0x1abc9c, ERROR: 0xe74c3c, WARNING: 0xffcc00,
@@ -308,12 +324,12 @@ function getSbQueue(guildId) {
     vcId:            null,
     timeout:         null,
     guildId,
-    lastTextChannel: null,
-    currentFile:     null,
-    volume:          1.0,
-    resource:        null,
-    // Prevent duplicate listener registration
-    _listenersAdded: false
+    // Store only the channel ID — never the full channel object.
+    // The live channel is resolved on-demand from guild.channels.cache.
+    lastTextChannelId: null,
+    currentFile:       null,
+    volume:            1.0,
+    resource:          null
   };
 
   // ── Audio player listeners (registered once) ──
@@ -343,14 +359,25 @@ function getSbQueue(guildId) {
       const guild = client.guilds.cache.get(guildId);
       if (!guild) return;
       if (q.list.length === 0) startSbLeaveTimer(guildId);
-      else await sbPlayNext(guild, q.lastTextChannel);
+      else {
+        // Resolve channel object on-demand from stored ID
+        const textCh = q.lastTextChannelId
+          ? (guild.channels.cache.get(q.lastTextChannelId) ?? null)
+          : null;
+        await sbPlayNext(guild, textCh);
+      }
       sbUpdatePanel(guild); // fire-and-forget panel refresh
     } catch (err) { console.error("[sb idle]", err); }
   });
 
   player.on("error", err => {
     console.error("[sb player error]", err);
-    q.lastTextChannel?.send({ content: `⚠️ **${q.now?.name ?? "Track"}** failed. Skipping…` }).catch(() => {});
+    // Resolve channel on-demand from stored ID — no object pinned in memory
+    const errGuild = client.guilds.cache.get(guildId);
+    const errCh = errGuild && q.lastTextChannelId
+      ? (errGuild.channels.cache.get(q.lastTextChannelId) ?? null)
+      : null;
+    errCh?.send({ content: `⚠️ **${q.now?.name ?? "Track"}** failed. Skipping…` }).catch(() => {});
     q.player.stop();
   });
 
@@ -400,9 +427,11 @@ async function sbEnsureStorage(guild) {
 }
 
 // ── Play next in queue ──
+// textChannel is the live channel object for this call only.
+// We persist only its ID in q.lastTextChannelId to avoid holding Discord.js objects.
 async function sbPlayNext(guild, textChannel = null, retryCount = 0) {
   const q = getSbQueue(guild.id);
-  if (textChannel) q.lastTextChannel = textChannel;
+  if (textChannel) q.lastTextChannelId = textChannel.id;
   if (!q.list.length) { q.now = null; startSbLeaveTimer(guild.id); sbUpdatePanel(guild); return; }
 
   const next = q.list.shift();
@@ -461,9 +490,20 @@ async function sbPlayNext(guild, textChannel = null, retryCount = 0) {
     q.now = null;
     if (retryCount < 1) {
       q.list.unshift(next);
-      setTimeout(() => sbPlayNext(guild, textChannel, retryCount + 1).catch(() => {}), 2_000).unref();
+      // Resolve channel from ID for retry to avoid closure capture of stale objects
+      setTimeout(() => {
+        const retryCh = q.lastTextChannelId
+          ? (guild.channels.cache.get(q.lastTextChannelId) ?? null)
+          : null;
+        sbPlayNext(guild, retryCh, retryCount + 1).catch(() => {});
+      }, 2_000).unref();
     } else {
-      setTimeout(() => sbPlayNext(guild, textChannel, 0).catch(() => {}), 1_000).unref();
+      setTimeout(() => {
+        const retryCh = q.lastTextChannelId
+          ? (guild.channels.cache.get(q.lastTextChannelId) ?? null)
+          : null;
+        sbPlayNext(guild, retryCh, 0).catch(() => {});
+      }, 1_000).unref();
     }
   }
 }
@@ -574,15 +614,42 @@ async function sbUpdatePanel(guild) {
 }
 
 // ─── Discord Client ───────────────────────────────────────────
+// Cache strategy: keep only what the bot actively needs.
+// GuildMembers intent kept for voiceStateUpdate member access.
+// GuildPresences intent kept for online alerts (presenceUpdate).
+// makeCache aggressively limits collections to reduce heap pressure.
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences
+    GatewayIntentBits.GuildVoiceStates,   // required for VC join/leave events
+    GatewayIntentBits.GuildMembers,        // required for member roles + voiceState.member
+    GatewayIntentBits.GuildPresences       // required for online alerts
   ],
   partials: [Partials.User, Partials.GuildMember],
+  makeCache: Options.cacheWithLimits({
+    ...Options.DefaultMakeCacheSettings,
+    // Messages are not needed — the bot does not read chat
+    MessageManager:       0,
+    // Reactions not needed
+    ReactionManager:      0,
+    // Threads only needed ephemerally; we track IDs ourselves
+    ThreadManager:        0,
+    ThreadMemberManager:  0,
+    // Keep a small member cache for recent voice events; large servers
+    // will still have members come in via voiceStateUpdate naturally.
+    GuildMemberManager:   { maxSize: 500, keepOverLimit: m => m.id === client.user?.id },
+    // Presences: only cache what we actually receive; hard-cap at 500
+    PresenceManager:      500,
+    // Channels: keep all (needed for permission checks + VC logic)
+    // Guilds: keep all (small Map, one per server)
+    // Roles: keep all (needed for ignoredRole checks)
+    // Emojis / stickers / stage instances — not used
+    GuildEmojiManager:    0,
+    GuildStickerManager:  0,
+    StageInstanceManager: 0,
+    GuildScheduledEventManager: 0,
+    AutoModerationRuleManager:  0
+  }),
   ws: { properties: { browser: "Discord iOS" } },
   shards: "auto",
   restRequestTimeout: 30_000
@@ -1042,129 +1109,188 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         // ─── /inv ─────────────────────────────────────────────────────────────
-        // Features:
-        //  • Detects whether invoker is in a VC
-        //  • If in VC → filters results to only users with access to that VC
-        //  • If not in VC → shows general top VC users (all-VC accessible)
-        //  • Removes limit option — always shows top results directly
-        //  • Adds per-user "Invite" button that DMs the user a notification
+        // Architecture:
+        //  • NEVER calls guild.members.fetch() — safe for large servers
+        //  • Candidate pool: currently-cached members only (natural via VC events)
+        //  • Filters: bots, self, already-in-same-VC, no VC access
+        //  • Ranked by DB join frequency; falls back to server join order
+        //  • Single-user view: clean, focused layout, no ranking numbers
+        //  • Multi-user view: ranked suggestion list with medals
+        //  • DM invite includes a jump-to-channel button (best Discord UX)
         // ────────────────────────────────────────────────────────────────────
         case "inv": {
           await interaction.deferReply({ flags: 64 });
 
           const searchQuery = (interaction.options.getString("search") ?? "").trim();
-          const MAX_RESULTS = 10;
+          const MAX_RESULTS = 8;
 
-          // Ensure member cache populated
-          await guild.members.fetch().catch(() => {});
+          // ── Invoker context ──────────────────────────────────────────────
+          const invokerVC = interaction.member?.voice?.channel ?? null;
+          const invokerId = interaction.user.id;
 
-          // Detect invoker's current VC
-          const invokerMember = interaction.member;
-          const invokerVC     = invokerMember?.voice?.channel ?? null;
-
-          // Helper: does member have access to a given VC?
-          function canAccessVC(member, vc) {
-            const p = vc.permissionsFor(member);
-            return p?.has(PermissionFlagsBits.ViewChannel) && p?.has(PermissionFlagsBits.Connect);
+          // ── Permission check helper (uses cached data, no fetch) ─────────
+          function memberCanJoinVC(member, vc) {
+            try {
+              const p = vc.permissionsFor(member);
+              return !!(p?.has(PermissionFlagsBits.ViewChannel) && p?.has(PermissionFlagsBits.Connect));
+            } catch { return false; }
           }
 
-          // ── Build candidate list ────────────────────────────────────────
+          // ── Candidate pool: cached members only ──────────────────────────
+          // Naturally populated via voiceStateUpdate, makeCache GuildMemberManager,
+          // and bot startup. We NEVER call guild.members.fetch() here.
+          const cachePool = [...guild.members.cache.values()].filter(m => {
+            if (m.user.bot)        return false;  // no bots
+            if (m.id === invokerId) return false;  // no self
+            if (!invokerVC)        return true;   // no VC filter when not in VC
+            if (!memberCanJoinVC(m, invokerVC)) return false;   // must have VC access
+            if (m.voice?.channelId === invokerVC.id) return false; // skip: already inside
+            return true;
+          });
+
           let candidates = [];
 
           if (searchQuery.length > 0) {
-            // SEARCH MODE — filter by name, then by VC access
+            // ── SEARCH MODE: name match against cache ────────────────────
             const q = searchQuery.toLowerCase();
-            for (const [, m] of guild.members.cache) {
-              if (m.user.bot) continue;
-              const nameHit = m.user.username.toLowerCase().includes(q) || (m.nickname ?? "").toLowerCase().includes(q);
-              if (!nameHit) continue;
-              // If invoker is in a VC → only include members who can access that VC
-              if (invokerVC) {
-                if (!canAccessVC(m, invokerVC)) continue;
-                candidates.push(m);
-              } else {
-                // No VC context → include if they can access any VC
-                const anyVC = guild.channels.cache.some(c => c.type === ChannelType.GuildVoice && canAccessVC(m, c));
-                if (anyVC) candidates.push(m);
-              }
-            }
+            candidates = cachePool
+              .filter(m =>
+                m.user.username.toLowerCase().includes(q) ||
+                (m.nickname ?? "").toLowerCase().includes(q) ||
+                m.displayName.toLowerCase().includes(q)
+              )
+              .slice(0, MAX_RESULTS);
           } else {
-            // DEFAULT MODE — top frequent VC users from DB
+            // ── DEFAULT MODE: rank by DB VC join frequency ───────────────
+            // Over-fetch DB to cover tag vs username mismatches in cache
             const freqResults = await GuildLog.aggregate([
               { $match: { guildId: guild.id, type: "join" } },
               { $group: { _id: "$user", joinCount: { $sum: 1 } } },
               { $sort: { joinCount: -1 } },
-              { $limit: MAX_RESULTS * 3 }  // over-fetch to account for misses
+              { $limit: MAX_RESULTS * 4 }
             ]).catch(() => []);
 
-            const seen = new Set();
-            for (const entry of freqResults) {
-              if (candidates.length >= MAX_RESULTS) break;
-              const member = guild.members.cache.find(m =>
-                m.user.tag === entry._id || m.user.username === entry._id
-              );
-              if (!member || member.user.bot || seen.has(member.id)) continue;
-              seen.add(member.id);
-              // If invoker is in a VC → filter by access
-              if (invokerVC && !canAccessVC(member, invokerVC)) continue;
-              candidates.push(member);
-            }
+            // Score map: username/tag → join count
+            const scoreMap = new Map(freqResults.map(r => [r._id, r.joinCount]));
 
-            // Fallback: if no DB logs yet, sort by join date
+            const scored = cachePool.map(m => ({
+              member: m,
+              score:  scoreMap.get(m.user.tag) ?? scoreMap.get(m.user.username) ?? 0
+            }));
+            scored.sort((a, b) => b.score - a.score);
+            candidates = scored.map(s => s.member).slice(0, MAX_RESULTS);
+
+            // Fallback: no DB scores yet → sort by most recent server join
             if (candidates.length === 0) {
-              candidates = [...guild.members.cache.values()]
-                .filter(m => !m.user.bot && (!invokerVC || canAccessVC(m, invokerVC)))
-                .sort((a, b) => (a.joinedTimestamp ?? 0) - (b.joinedTimestamp ?? 0))
+              candidates = cachePool
+                .sort((a, b) => (b.joinedTimestamp ?? 0) - (a.joinedTimestamp ?? 0))
                 .slice(0, MAX_RESULTS);
             }
           }
 
-          candidates = candidates.slice(0, MAX_RESULTS);
-
+          // ── Empty state ─────────────────────────────────────────────────
           if (candidates.length === 0) {
-            const desc = invokerVC
-              ? sc(`No members found who can access **${invokerVC.name}**.`)
-              : sc(`No members found${searchQuery ? ` matching "${searchQuery}"` : ""}.`);
+            const why = invokerVC
+              ? `No one available to invite to **${invokerVC.name}** right now.`
+              : searchQuery
+                ? `No users found matching **"${searchQuery}"**.`
+                : "No invite candidates found.\nTry searching by name with the `search` option.";
             return interaction.editReply({
-              embeds: [makeEmbed({ title: sc("📭 ɴᴏ ʀᴇsᴜʟᴛs"), description: desc, color: EmbedColors.WARNING, guild })]
+              embeds: [
+                new EmbedBuilder()
+                  .setColor(EmbedColors.WARNING)
+                  .setAuthor({ name: "Voice Invite", iconURL: client.user.displayAvatarURL() })
+                  .setDescription(`∅  ${why}`)
+                  .setFooter({ text: guild.name })
+                  .setTimestamp()
+              ]
             });
           }
 
-          // ── Build embed ─────────────────────────────────────────────────
-          const medals = ["🥇","🥈","🥉"];
-          const listText = candidates.map((m, i) => {
-            const medal      = medals[i] ?? `\`${i+1}.\``;
-            const status     = m.presence?.status ?? "offline";
-            const statusMoji = { online:"🟢", idle:"🟡", dnd:"🔴" }[status] ?? "⚫";
-            const vcStatus   = m.voice?.channel ? `🎧 \`${m.voice.channel.name}\`` : sc("not in vc");
-            return `${medal} ${m} ${statusMoji}\n> ${vcStatus}`;
-          }).join("\n\n");
+          // ── UI helpers ───────────────────────────────────────────────────
+          const isSingleUser = candidates.length === 1;
 
-          const vcInfo = invokerVC
-            ? `${sc("📍 ʏᴏᴜʀ ᴠᴄ:")} **${invokerVC.name}** (${invokerVC.members.size} member${invokerVC.members.size !== 1 ? "s" : ""})\n${sc("🔒 showing users who can access this vc")}`
-            : sc("💡 join a vc first to see who can access it, then invite someone!");
+          // Cached presence status dot — acceptable staleness
+          function presenceDot(member) {
+            const s = member.presence?.status;
+            return { online: "🟢", idle: "🟡", dnd: "🔴" }[s] ?? "⚫";
+          }
+
+          // Where is this person? (only show if not in invoker's VC)
+          function currentLocationBadge(member) {
+            const ch = member.voice?.channel;
+            if (!ch || ch.id === invokerVC?.id) return null;
+            return `📡 Already in **${ch.name}**`;
+          }
+
+          // ── Single-user layout ───────────────────────────────────────────
+          let descBody;
+          if (isSingleUser) {
+            const m   = candidates[0];
+            const dot = presenceDot(m);
+            const loc = currentLocationBadge(m);
+            const statusLabel = { online: "Online", idle: "Idle", dnd: "Do Not Disturb" }[m.presence?.status] ?? "Offline";
+            descBody =
+              `${m} ${dot} **${statusLabel}**` +
+              (loc ? `\n${loc}` : "");
+          } else {
+            // ── Multi-user layout: ranked, scannable ─────────────────────
+            const medals = ["🥇", "🥈", "🥉"];
+            descBody = candidates.map((m, i) => {
+              const rank = medals[i] ?? `**${i + 1}.**`;
+              const dot  = presenceDot(m);
+              const loc  = currentLocationBadge(m);
+              return `${rank} ${m} ${dot}` + (loc ? `\n└ ${loc}` : "");
+            }).join("\n\n");
+          }
+
+          // ── VC context header ─────────────────────────────────────────────
+          const headerLine = invokerVC
+            ? `**🔊 ${invokerVC.name}** — ${invokerVC.members.size} member${invokerVC.members.size !== 1 ? "s" : ""} inside`
+            : "⚠️ Join a voice channel first to send targeted invites.";
 
           const invEmbed = new EmbedBuilder()
             .setColor(EmbedColors.VC_JOIN)
-            .setAuthor({ name: sc("📨 ɪɴᴠɪᴛᴇ ᴛᴏ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
-            .setDescription(`${vcInfo}\n\n${sc(`🎙️ ᴛᴏᴘ ${candidates.length} ᴠᴄ ᴜsᴇʀs:`)}\n\n${listText}`)
-            .setFooter({ text: sc(`use /inv search:<name> to find a specific user • ${guild.name}`) })
+            .setAuthor({ name: "Voice Invite", iconURL: client.user.displayAvatarURL() })
+            .setDescription(
+              `${headerLine}\n\n` +
+              (isSingleUser
+                ? `**Invite to your channel:**\n${descBody}`
+                : `**Who do you want to invite?**\n\n${descBody}`)
+            )
+            .setFooter({
+              text: searchQuery
+                ? `Results for "${searchQuery}" • ${guild.name}`
+                : `Top suggestions • ${guild.name}`
+            })
             .setTimestamp();
 
-          // ── Invite buttons (up to 5 users get a button row) ────────────
-          // Each button triggers a DM notification to the selected user
+          // ── Invite buttons: one per candidate (max 5) ────────────────────
+          // customId stores only IDs — no Discord.js objects in memory
           const buttonRows = [];
-          const btnCandidates = candidates.slice(0, 5); // max 5 buttons per message
-          if (btnCandidates.length > 0 && invokerVC) {
+          if (invokerVC && candidates.length > 0) {
+            const btnCandidates = candidates.slice(0, 5);
             const row = new ActionRowBuilder().addComponents(
               btnCandidates.map(m =>
                 new ButtonBuilder()
                   .setCustomId(`inv_notify_${m.id}_${invokerVC.id}`)
-                  .setLabel(`📨 ${m.displayName.slice(0, 20)}`)
-                  .setStyle(ButtonStyle.Primary)
+                  .setLabel(isSingleUser ? "Send Invite" : m.displayName.slice(0, 25))
+                  .setStyle(isSingleUser ? ButtonStyle.Success : ButtonStyle.Primary)
+                  .setEmoji(isSingleUser ? "📨" : "🔔")
               )
             );
             buttonRows.push(row);
+          } else if (!invokerVC) {
+            // Info-only button when not in VC
+            buttonRows.push(
+              new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                  .setCustomId("inv_no_vc_info")
+                  .setLabel("Join a voice channel to invite someone")
+                  .setStyle(ButtonStyle.Secondary)
+                  .setDisabled(true)
+              )
+            );
           }
 
           return interaction.editReply({ embeds: [invEmbed], components: buttonRows });
@@ -1270,49 +1396,118 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!guild) return;
 
       try {
-        // ── /inv notify button ────────────────────────────
+        // ── /inv notify button ────────────────────────────────────────────
+        // customId format: inv_notify_{targetMemberId}_{vcId}
+        // Stores only IDs — never full Discord.js objects.
         if (customId.startsWith("inv_notify_")) {
-          // format: inv_notify_{targetMemberId}_{vcId}
           const parts          = customId.split("_");
           const targetMemberId = parts[2];
           const vcId           = parts[3];
 
-          const targetMember = await guild.members.fetch(targetMemberId).catch(() => null);
-          const vc           = guild.channels.cache.get(vcId);
-          const invokerVC    = member.voice?.channel;
+          // Resolve target from cache first; only fetch if not cached
+          const targetMember = guild.members.cache.get(targetMemberId)
+                            ?? await guild.members.fetch(targetMemberId).catch(() => null);
+          // Resolve VC from cache (channels are always fully cached)
+          const vc = guild.channels.cache.get(vcId);
 
-          if (!targetMember) return interaction.reply({ content: sc("❌ User not found."), flags: 64 });
-          if (!vc)           return interaction.reply({ content: sc("❌ Voice channel no longer exists."), flags: 64 });
+          if (!targetMember) {
+            return interaction.reply({ content: "❌ That user is no longer in this server.", flags: 64 });
+          }
+          if (!vc) {
+            return interaction.reply({ content: "❌ That voice channel no longer exists.", flags: 64 });
+          }
 
-          // Try to DM the target user
+          // ── Validate invoker is still in the right VC ───────────────────
+          const invokerVCNow = member.voice?.channel;
+          if (!invokerVCNow || invokerVCNow.id !== vcId) {
+            return interaction.reply({
+              content: `⚠️ You're no longer in **${vc.name}**. Rejoin the channel and try again.`,
+              flags: 64
+            });
+          }
+
+          // ── Build the best possible jump link ──────────────────────────
+          // Discord doesn't allow bots to force-join users to VC, but we can
+          // provide a direct channel link that navigates there on click.
+          // https://discord.com/channels/{guildId}/{channelId} is the deeplink
+          // Discord opens for channel URLs — on desktop it jumps straight there,
+          // on mobile it opens the app to the channel.
+          const vcJumpLink = `https://discord.com/channels/${guild.id}/${vc.id}`;
+
+          const joinRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel("Open in Discord")
+              .setStyle(ButtonStyle.Link)
+              .setURL(vcJumpLink)
+              .setEmoji("🔊")
+          );
+
+          // ── DM embed ────────────────────────────────────────────────────
           const dmEmbed = new EmbedBuilder()
             .setColor(EmbedColors.VC_JOIN)
-            .setAuthor({ name: `${member.user.username} invited you!`, iconURL: member.user.displayAvatarURL({ dynamic: true }) })
-            .setTitle(sc("📨 ᴠᴄ ɪɴᴠɪᴛᴇ"))
+            .setAuthor({
+              name: `${member.user.username} is inviting you`,
+              iconURL: member.user.displayAvatarURL({ dynamic: true })
+            })
             .setDescription(
-              `**${member.user.username}** is inviting you to join:\n\n` +
-              `🎧 **${vc.name}** — ${guild.name}\n\n` +
-              `*Head over to Discord and join the voice channel!*`
+              `You've been invited to join a voice channel.\n\n` +
+              `**🔊 ${vc.name}**\n` +
+              `${guild.name}\n\n` +
+              `Tap the button below to open Discord and join.`
             )
-            .setFooter({ text: sc(`from ${guild.name}`) })
+            .setFooter({ text: guild.name, iconURL: guild.iconURL({ dynamic: true }) ?? undefined })
             .setTimestamp();
 
-          const dmSent = await targetMember.send({ embeds: [dmEmbed] }).then(() => true).catch(() => false);
+          // ── Attempt DM ─────────────────────────────────────────────────
+          const dmSent = await targetMember.send({
+            embeds:     [dmEmbed],
+            components: [joinRow]
+          }).then(() => true).catch(() => false);
 
           if (dmSent) {
-            return interaction.reply({ content: sc(`✅ invite sent to ${targetMember.displayName} via dm!`), flags: 64 });
-          } else {
-            // DMs closed → post mention in the VC's parent text channel (or current channel)
-            const fallbackCh = invokerVC?.parent?.children?.cache?.find(c => c.isTextBased()) ?? interaction.channel;
-            if (fallbackCh?.isTextBased()) {
-              await fallbackCh.send({
-                content: `${targetMember} — **${member.user.username}** is inviting you to join **${vc.name}**! 🎧`,
-                embeds:  [dmEmbed]
-              }).catch(() => {});
-              return interaction.reply({ content: sc(`📣 couldn't dm ${targetMember.displayName} — notified in channel instead!`), flags: 64 });
-            }
-            return interaction.reply({ content: sc(`⚠️ couldn't reach ${targetMember.displayName} (dms closed).`), flags: 64 });
+            return interaction.reply({
+              content: `✅ Invite sent to **${targetMember.displayName}** — they'll get a DM with a join link.`,
+              flags: 64
+            });
           }
+
+          // ── DM failed: fall back to channel mention ─────────────────────
+          // Try: VC category text channel → interaction channel
+          const fallbackCh =
+            invokerVCNow?.parent?.children?.cache?.find(c => c.isTextBased() && c.id !== vc.id) ??
+            interaction.channel;
+
+          if (fallbackCh?.isTextBased()) {
+            // Include the jump button in the channel message too
+            const channelEmbed = new EmbedBuilder()
+              .setColor(EmbedColors.VC_JOIN)
+              .setAuthor({
+                name: `${member.user.username} is inviting you`,
+                iconURL: member.user.displayAvatarURL({ dynamic: true })
+              })
+              .setDescription(
+                `Hey ${targetMember} — you're invited to join **${vc.name}**!\n\n` +
+                `Tap below to jump straight there.`
+              )
+              .setFooter({ text: guild.name })
+              .setTimestamp();
+
+            await fallbackCh.send({
+              content: `${targetMember}`,
+              embeds:  [channelEmbed],
+              components: [joinRow]
+            }).catch(() => {});
+
+            return interaction.reply({
+              content: `📣 Couldn't DM **${targetMember.displayName}** — notified them in the channel instead.`,
+              flags: 64
+            });
+          }
+
+          return interaction.reply({
+            content: `⚠️ Couldn't reach **${targetMember.displayName}** — their DMs are closed and no fallback channel is available.`,
+            flags: 64
+          });
         }
 
         // ── Soundboard buttons ────────────────────────────
@@ -1405,17 +1600,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const focused = (interaction.options.getFocused() ?? "").toString().toLowerCase();
 
       if (interaction.commandName === "inv") {
-        // Only search if member cache already available (avoid full guild fetch in autocomplete)
-        const members = [...guild.members.cache.values()]
-          .filter(m => !m.user.bot && (
-            m.user.username.toLowerCase().includes(focused) ||
-            (m.nickname ?? "").toLowerCase().includes(focused)
-          ))
-          .slice(0, 25);
+        // Autocomplete: search cached members only — never fetches guild.members
+        // VC-aware: prefer members who can access the invoker's current VC
+        const invokerVC = interaction.member?.voice?.channel ?? null;
+
+        const q = focused.toLowerCase();
+        let pool = [...guild.members.cache.values()].filter(m => {
+          if (m.user.bot || m.id === interaction.user.id) return false;
+          if (!q) return true; // empty query: show all valid candidates
+          return (
+            m.user.username.toLowerCase().includes(q) ||
+            (m.nickname ?? "").toLowerCase().includes(q) ||
+            m.displayName.toLowerCase().includes(q)
+          );
+        });
+
+        // Prefer members who can access the invoker's VC (sort to top, don't exclude)
+        if (invokerVC) {
+          pool.sort((a, b) => {
+            const aAccess = canInviteToVC(a, invokerVC);
+            const bAccess = canInviteToVC(b, invokerVC);
+            if (aAccess && !bAccess) return -1;
+            if (!aAccess && bAccess) return  1;
+            return 0;
+          });
+        }
+
+        pool = pool.slice(0, 25);
+
         return interaction.respond(
-          members.length
-            ? members.map(m => ({ name: `${m.displayName} (@${m.user.username})`, value: m.user.username }))
-            : [{ name: sc("ɴᴏ ʀᴇsᴜʟᴛs"), value: focused || "" }]
+          pool.length
+            ? pool.map(m => {
+                const inVC  = m.voice?.channelId === invokerVC?.id;
+                const badge = inVC ? " [already inside]" : "";
+                return { name: `${m.displayName} (@${m.user.username})${badge}`, value: m.user.username };
+              })
+            : [{ name: "No users found", value: focused || " " }]
         );
       }
 
@@ -1439,7 +1659,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ─── Voice Channel Alert System ───────────────────────────────
-const activeVCThreads     = new Map();  // vcId → thread
+// IMPORTANT: store only threadId strings — never full thread objects.
+// Full thread objects pin Discord.js internals in memory and prevent GC.
+const activeVCThreads     = new Map();  // vcId → threadId (string)
 const threadDeletion      = new Map();  // vcId → timeoutId
 const threadLastActivity  = new Map();  // vcId → timestamp (ms)
 const vcLocks             = new Map();  // vcId → Promise (mutex)
@@ -1447,13 +1669,21 @@ const vcLocks             = new Map();  // vcId → Promise (mutex)
 const THREAD_INACTIVITY   = 5 * 60_000;   // 5 min
 const THREAD_CHECK_MS     = 30_000;        // 30 s
 
-// Periodic inactivity check (replaces individual timeouts where possible)
-const threadCleanupInterval = setInterval(() => {
+// Periodic inactivity check — fetches thread object only when it must delete it,
+// keeping the long-lived Map free of Discord.js object references.
+const threadCleanupInterval = setInterval(async () => {
   const now = Date.now();
   for (const [vcId, last] of threadLastActivity.entries()) {
     if (now - last >= THREAD_INACTIVITY) {
-      const thread = activeVCThreads.get(vcId);
-      if (thread) thread.delete().catch(() => {});
+      const threadId = activeVCThreads.get(vcId);
+      if (threadId) {
+        // Fetch the thread object on-demand only for deletion
+        for (const guild of client.guilds.cache.values()) {
+          const ch = guild.channels.cache.find(c => c.isThread?.() && c.id === threadId)
+                  ?? await guild.channels.fetch(threadId).catch(() => null);
+          if (ch) { ch.delete().catch(() => {}); break; }
+        }
+      }
       activeVCThreads.delete(vcId);
       threadLastActivity.delete(vcId);
       const t = threadDeletion.get(vcId);
@@ -1479,10 +1709,20 @@ async function fetchTextChannel(guild, channelId) {
 }
 
 client.on("channelDelete", channel => {
+  // Clean up thread tracking by vcId or by threadId match
   const t = threadDeletion.get(channel.id);
   if (t) { clearTimeout(t); threadDeletion.delete(channel.id); }
   activeVCThreads.delete(channel.id);
   threadLastActivity.delete(channel.id);
+  // Also remove any entry where the stored threadId matches the deleted channel
+  for (const [vcId, threadId] of activeVCThreads.entries()) {
+    if (threadId === channel.id) {
+      activeVCThreads.delete(vcId);
+      threadLastActivity.delete(vcId);
+      const t2 = threadDeletion.get(vcId);
+      if (t2) { clearTimeout(t2); threadDeletion.delete(vcId); }
+    }
+  }
 });
 
 client.on("voiceStateUpdate", async (oldState, newState) => {
@@ -1533,25 +1773,42 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       const isPrivateVC   = everyonePerms && !everyonePerms.has(PermissionsBitField.Flags.ViewChannel);
 
       if (isPrivateVC && settings.privateThreadAlerts) {
-        let thread = activeVCThreads.get(vc.id);
-        if (!thread || thread.archived || !logChannel.threads.cache.has(thread.id)) {
+        // Retrieve existing thread by stored ID — never store the object itself
+        const existingThreadId = activeVCThreads.get(vc.id);
+        let thread = null;
+        if (existingThreadId) {
+          thread = logChannel.threads.cache.get(existingThreadId)
+                ?? await logChannel.threads.fetch(existingThreadId).catch(() => null);
+          if (thread?.archived) thread = null; // treat archived threads as gone
+        }
+
+        if (!thread) {
           const shortName = vc.name.length > 80 ? vc.name.slice(0, 80) + "…" : vc.name;
           try {
             thread = await logChannel.threads.create({
-              name: `🔊│${shortName} • VC Alerts`,
+              name: `🔊 ${shortName}`,
               type: ChannelType.PrivateThread,
               autoArchiveDuration: 1440,
-              reason: `Private VC alert thread for ${vc.name}`
+              reason: `VC alert thread for ${vc.name}`
             });
-            activeVCThreads.set(vc.id, thread);
+            // Store only the thread ID — let Discord.js GC the full object
+            activeVCThreads.set(vc.id, thread.id);
           } catch (err) { console.warn("[VC Thread] create failed:", err.message); return; }
+        } else {
+          // Update stored ID in case it changed after fetch
+          activeVCThreads.set(vc.id, thread.id);
         }
 
         threadLastActivity.set(vc.id, Date.now());
-        // Per-thread deletion timer (as safety net)
+        // Per-thread deletion timer (safety net on top of the interval)
         if (threadDeletion.has(vc.id)) clearTimeout(threadDeletion.get(vc.id));
         const t = setTimeout(async () => {
-          activeVCThreads.get(vc.id)?.delete().catch(() => {});
+          const tid = activeVCThreads.get(vc.id);
+          if (tid) {
+            const th = logChannel.threads.cache.get(tid)
+                    ?? await logChannel.threads.fetch(tid).catch(() => null);
+            if (th) th.delete().catch(() => {});
+          }
           activeVCThreads.delete(vc.id);
           threadDeletion.delete(vc.id);
           threadLastActivity.delete(vc.id);
@@ -1559,8 +1816,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
         t.unref();
         threadDeletion.set(vc.id, t);
 
-        // Add members with VC view permission in batches
-        const memberIds = [...guild.members.cache.filter(m => !m.user.bot && vc.permissionsFor(m)?.has(PermissionsBitField.Flags.ViewChannel)).keys()];
+        // Add only currently-cached members with VC view permission
+        // Never calls guild.members.fetch() — uses only what is already in cache
+        const memberIds = [...guild.members.cache.values()]
+          .filter(m => !m.user.bot && vc.permissionsFor(m)?.has(PermissionsBitField.Flags.ViewChannel))
+          .map(m => m.id);
         for (let i = 0; i < memberIds.length; i += 20) {
           await Promise.all(memberIds.slice(i, i + 20).map(id => thread.members.add(id).catch(() => {})));
           if (i + 20 < memberIds.length) await new Promise(r => setTimeout(r, 100));
