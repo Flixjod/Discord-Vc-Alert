@@ -1109,15 +1109,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         // ─── /inv ─────────────────────────────────────────────────────────────
-        // Architecture:
-        //  • NEVER calls guild.members.fetch() — safe for large servers
-        //  • Candidate pool: currently-cached members only (natural via VC events)
-        //  • Filters: bots, self, already-in-same-VC, no VC access
-        //  • Ranked by DB join frequency; falls back to server join order
-        //  • Single-user view: clean, focused layout, no ranking numbers
-        //  • Multi-user view: ranked suggestion list with medals
-        //  • DM invite includes a jump-to-channel button (best Discord UX)
-        // ────────────────────────────────────────────────────────────────────
         case "inv": {
           await interaction.deferReply({ flags: 64 });
 
@@ -1137,8 +1128,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           // ── Candidate pool: cached members only ──────────────────────────
-          // Naturally populated via voiceStateUpdate, makeCache GuildMemberManager,
-          // and bot startup. We NEVER call guild.members.fetch() here.
           const cachePool = [...guild.members.cache.values()].filter(m => {
             if (m.user.bot)        return false;  // no bots
             if (m.id === invokerId) return false;  // no self
@@ -1162,7 +1151,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .slice(0, MAX_RESULTS);
           } else {
             // ── DEFAULT MODE: rank by DB VC join frequency ───────────────
-            // Over-fetch DB to cover tag vs username mismatches in cache
             const freqResults = await GuildLog.aggregate([
               { $match: { guildId: guild.id, type: "join" } },
               { $group: { _id: "$user", joinCount: { $sum: 1 } } },
@@ -1170,7 +1158,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
               { $limit: MAX_RESULTS * 4 }
             ]).catch(() => []);
 
-            // Score map: username/tag → join count
             const scoreMap = new Map(freqResults.map(r => [r._id, r.joinCount]));
 
             const scored = cachePool.map(m => ({
@@ -1191,17 +1178,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // ── Empty state ─────────────────────────────────────────────────
           if (candidates.length === 0) {
             const why = invokerVC
-              ? `No one available to invite to **${invokerVC.name}** right now.`
+              ? `Everyone's already here, or no one is available to join **${invokerVC.name}**.`
               : searchQuery
-                ? `No users found matching **"${searchQuery}"**.`
+                ? `Couldn't find anyone matching **"${searchQuery}"**.`
                 : "No invite candidates found.\nTry searching by name with the `search` option.";
             return interaction.editReply({
               embeds: [
                 new EmbedBuilder()
                   .setColor(EmbedColors.WARNING)
-                  .setAuthor({ name: "Voice Invite", iconURL: client.user.displayAvatarURL() })
-                  .setDescription(`∅  ${why}`)
-                  .setFooter({ text: guild.name })
+                  .setAuthor({ name: sc("📡 ʀᴀᴅᴀʀ ᴇᴍᴘᴛʏ"), iconURL: client.user.displayAvatarURL() })
+                  .setDescription(sc(`> ${why}`))
+                  .setFooter({ text: sc(guild.name) })
                   .setTimestamp()
               ]
             });
@@ -1210,63 +1197,61 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // ── UI helpers ───────────────────────────────────────────────────
           const isSingleUser = candidates.length === 1;
 
-          // Cached presence status dot — acceptable staleness
           function presenceDot(member) {
             const s = member.presence?.status;
             return { online: "🟢", idle: "🟡", dnd: "🔴" }[s] ?? "⚫";
           }
 
-          // Where is this person? (only show if not in invoker's VC)
           function currentLocationBadge(member) {
             const ch = member.voice?.channel;
             if (!ch || ch.id === invokerVC?.id) return null;
-            return `📡 Already in **${ch.name}**`;
+            return `*Currently in* **${ch.name}**`;
           }
 
-          // ── Single-user layout ───────────────────────────────────────────
+          // ── Premium Layout Setup ─────────────────────────────────────────
           let descBody;
           if (isSingleUser) {
             const m   = candidates[0];
             const dot = presenceDot(m);
             const loc = currentLocationBadge(m);
             const statusLabel = { online: "Online", idle: "Idle", dnd: "Do Not Disturb" }[m.presence?.status] ?? "Offline";
-            descBody =
-              `${m} ${dot} **${statusLabel}**` +
-              (loc ? `\n${loc}` : "");
+            descBody = 
+              `🎯 **${m.displayName}** ${dot}\n` +
+              `> ${sc("sᴛᴀᴛᴜs:")} **${statusLabel}**\n` +
+              (loc ? `> 📡 ${loc}` : `> ✨ *Ready to be invited*`);
           } else {
-            // ── Multi-user layout: ranked, scannable ─────────────────────
+            // Multi-user layout: Sleek, scannable guest list
             const medals = ["🥇", "🥈", "🥉"];
             descBody = candidates.map((m, i) => {
-              const rank = medals[i] ?? `**${i + 1}.**`;
+              const rank = medals[i] ?? `\`${i + 1}.\``;
               const dot  = presenceDot(m);
               const loc  = currentLocationBadge(m);
-              return `${rank} ${m} ${dot}` + (loc ? `\n└ ${loc}` : "");
+              return `${rank} **${m.displayName}** ${dot}` + (loc ? `\n   └ 📡 ${loc}` : "");
             }).join("\n\n");
           }
 
           // ── VC context header ─────────────────────────────────────────────
           const headerLine = invokerVC
-            ? `**🔊 ${invokerVC.name}** — ${invokerVC.members.size} member${invokerVC.members.size !== 1 ? "s" : ""} inside`
-            : "⚠️ Join a voice channel first to send targeted invites.";
+            ? `${sc("📍 ᴄᴜʀʀᴇɴᴛ ᴠᴄ:")} **${invokerVC.name}** 👥 \`${invokerVC.members.size} inside\``
+            : `⚠️ ${sc("Join a voice channel first to send targeted invites.")}`;
 
           const invEmbed = new EmbedBuilder()
             .setColor(EmbedColors.VC_JOIN)
-            .setAuthor({ name: "Voice Invite", iconURL: client.user.displayAvatarURL() })
+            .setAuthor({ name: sc("📨 ᴠᴏɪᴄᴇ ɪɴᴠɪᴛᴇ sʏsᴛᴇᴍ"), iconURL: client.user.displayAvatarURL() })
             .setDescription(
               `${headerLine}\n\n` +
               (isSingleUser
-                ? `**Invite to your channel:**\n${descBody}`
-                : `**Who do you want to invite?**\n\n${descBody}`)
+                ? `${sc("▼ sᴇʟᴇᴄᴛᴇᴅ ᴛᴀʀɢᴇᴛ:")}\n${descBody}`
+                : `${sc("▼ ᴠɪᴘ ɢᴜᴇsᴛ ʟɪsᴛ:")}\n${descBody}`)
             )
             .setFooter({
               text: searchQuery
-                ? `Results for "${searchQuery}" • ${guild.name}`
-                : `Top suggestions • ${guild.name}`
+                ? sc(`search: "${searchQuery}" • ${guild.name}`)
+                : sc(`top recommendations • ${guild.name}`)
             })
             .setTimestamp();
 
-          // ── Invite buttons: one per candidate (max 5) ────────────────────
-          // customId stores only IDs — no Discord.js objects in memory
+          // ── Invite buttons: Sleek styling ────────────────────────────────
           const buttonRows = [];
           if (invokerVC && candidates.length > 0) {
             const btnCandidates = candidates.slice(0, 5);
@@ -1274,19 +1259,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
               btnCandidates.map(m =>
                 new ButtonBuilder()
                   .setCustomId(`inv_notify_${m.id}_${invokerVC.id}`)
-                  .setLabel(isSingleUser ? "Send Invite" : m.displayName.slice(0, 25))
+                  .setLabel(isSingleUser ? sc("sᴇɴᴅ ɪɴᴠɪᴛᴇ") : m.displayName.slice(0, 25))
                   .setStyle(isSingleUser ? ButtonStyle.Success : ButtonStyle.Primary)
-                  .setEmoji(isSingleUser ? "📨" : "🔔")
+                  .setEmoji(isSingleUser ? "✨" : "📨")
               )
             );
             buttonRows.push(row);
           } else if (!invokerVC) {
-            // Info-only button when not in VC
             buttonRows.push(
               new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                   .setCustomId("inv_no_vc_info")
-                  .setLabel("Join a voice channel to invite someone")
+                  .setLabel(sc("ᴊᴏɪɴ ᴀ ᴠᴄ ᴛᴏ ɪɴᴠɪᴛᴇ"))
                   .setStyle(ButtonStyle.Secondary)
                   .setDisabled(true)
               )
@@ -1295,6 +1279,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           return interaction.editReply({ embeds: [invEmbed], components: buttonRows });
         }
+
 
         // ─── /sound ───────────────────────────────────────
         case "sound": {
@@ -1396,9 +1381,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!guild) return;
 
       try {
-        // ── /inv notify button ────────────────────────────────────────────
-        // customId format: inv_notify_{targetMemberId}_{vcId}
-        // Stores only IDs — never full Discord.js objects.
+                // ── /inv notify button ────────────────────────────────────────────
         if (customId.startsWith("inv_notify_")) {
           const parts          = customId.split("_");
           const targetMemberId = parts[2];
@@ -1407,7 +1390,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // Resolve target from cache first; only fetch if not cached
           const targetMember = guild.members.cache.get(targetMemberId)
                             ?? await guild.members.fetch(targetMemberId).catch(() => null);
-          // Resolve VC from cache (channels are always fully cached)
+          // Resolve VC from cache
           const vc = guild.channels.cache.get(vcId);
 
           if (!targetMember) {
@@ -1426,37 +1409,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
           }
 
-          // ── Build the best possible jump link ──────────────────────────
-          // Discord doesn't allow bots to force-join users to VC, but we can
-          // provide a direct channel link that navigates there on click.
-          // https://discord.com/channels/{guildId}/{channelId} is the deeplink
-          // Discord opens for channel URLs — on desktop it jumps straight there,
-          // on mobile it opens the app to the channel.
+          // ── Build the jump link ─────────────────────────────────────────
           const vcJumpLink = `https://discord.com/channels/${guild.id}/${vc.id}`;
 
-          const joinRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setLabel("Open in Discord")
-              .setStyle(ButtonStyle.Link)
-              .setURL(vcJumpLink)
-              .setEmoji("🔊")
-          );
-
-          // ── DM embed ────────────────────────────────────────────────────
+          // ── DM embed: Make it feel like an exclusive invite ──────────────
           const dmEmbed = new EmbedBuilder()
-            .setColor(EmbedColors.VC_JOIN)
+            .setColor(EmbedColors.SUCCESS)
             .setAuthor({
-              name: `${member.user.username} is inviting you`,
+              name: sc("✨ ʏᴏᴜ'ᴠᴇ ʙᴇᴇɴ ɪɴᴠɪᴛᴇᴅ!"),
               iconURL: member.user.displayAvatarURL({ dynamic: true })
             })
             .setDescription(
-              `You've been invited to join a voice channel.\n\n` +
-              `**🔊 ${vc.name}**\n` +
-              `${guild.name}\n\n` +
-              `Tap the button below to open Discord and join.`
+              `Hey <@${targetMember.id}>, **${member.displayName}** is calling you to join the vibes! 🎧\n\n` +
+              `> ${sc("📍 ᴄʜᴀɴɴᴇʟ:")} **${vc.name}**\n` +
+              `> ${sc("🌐 sᴇʀᴠᴇʀ:")} **${guild.name}**\n\n` +
+              `*Tap the button below to jump straight into the action.* 🚀`
             )
-            .setFooter({ text: guild.name, iconURL: guild.iconURL({ dynamic: true }) ?? undefined })
+            .setThumbnail(guild.iconURL({ dynamic: true }) ?? undefined)
+            .setFooter({ text: sc("we're waiting for you...") })
             .setTimestamp();
+
+          const joinRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel("🚀 Jump In")
+              .setStyle(ButtonStyle.Link)
+              .setURL(vcJumpLink)
+          );
 
           // ── Attempt DM ─────────────────────────────────────────────────
           const dmSent = await targetMember.send({
@@ -1466,30 +1444,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           if (dmSent) {
             return interaction.reply({
-              content: `✅ Invite sent to **${targetMember.displayName}** — they'll get a DM with a join link.`,
+              content: `✅ ${sc("ɪɴᴠɪᴛᴇ ᴅᴇʟɪᴠᴇʀᴇᴅ:")} **${targetMember.displayName}** has been summoned to your VC!`,
               flags: 64
             });
           }
 
-          // ── DM failed: fall back to channel mention ─────────────────────
-          // Try: VC category text channel → interaction channel
+          // ── DM failed: Sleek channel fallback mention ───────────────────
           const fallbackCh =
             invokerVCNow?.parent?.children?.cache?.find(c => c.isTextBased() && c.id !== vc.id) ??
             interaction.channel;
 
           if (fallbackCh?.isTextBased()) {
-            // Include the jump button in the channel message too
             const channelEmbed = new EmbedBuilder()
               .setColor(EmbedColors.VC_JOIN)
               .setAuthor({
-                name: `${member.user.username} is inviting you`,
+                name: sc("✨ ᴠᴄ ɪɴᴠɪᴛᴇ"),
                 iconURL: member.user.displayAvatarURL({ dynamic: true })
               })
               .setDescription(
-                `Hey ${targetMember} — you're invited to join **${vc.name}**!\n\n` +
-                `Tap below to jump straight there.`
+                `Hey ${targetMember}! **${member.displayName}** wants you in **${vc.name}**.\n\n` +
+                `> *Don't leave them hanging — tap below to join the vibes!* 🎧`
               )
-              .setFooter({ text: guild.name })
+              .setFooter({ text: sc(guild.name) })
               .setTimestamp();
 
             await fallbackCh.send({
@@ -1499,13 +1475,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }).catch(() => {});
 
             return interaction.reply({
-              content: `📣 Couldn't DM **${targetMember.displayName}** — notified them in the channel instead.`,
+              content: `📣 ${sc("ᴅᴍs ᴄʟᴏsᴇᴅ:")} Tagged **${targetMember.displayName}** in the channel instead.`,
               flags: 64
             });
           }
 
           return interaction.reply({
-            content: `⚠️ Couldn't reach **${targetMember.displayName}** — their DMs are closed and no fallback channel is available.`,
+            content: `⚠️ ${sc("ᴍɪssɪᴏɴ ғᴀɪʟᴇᴅ:")} Couldn't reach **${targetMember.displayName}** (DMs closed, no fallback channel).`,
             flags: 64
           });
         }
