@@ -90,7 +90,27 @@ const SMALL_CAPS_MAP = Object.freeze({
   "0":"0","1":"1","2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9",
   "!":"!","?":"?",".":".",",":",",":":":","'":"'",'"':'"',"-":" - ","_":"_"," ":" "
 });
-const sc = (text = "") => String(text).split("").map(ch => SMALL_CAPS_MAP[ch] ?? ch).join("");
+
+// Capped cache for sc() results to avoid repeated string splitting/mapping
+const SC_CACHE = new Map();
+const MAX_SC_CACHE_SIZE = 1000;
+
+const sc = (text = "") => {
+  const s = String(text);
+  if (!s) return "";
+  const cached = SC_CACHE.get(s);
+  if (cached) return cached;
+
+  const result = s.split("").map(ch => SMALL_CAPS_MAP[ch] ?? ch).join("");
+
+  if (SC_CACHE.size >= MAX_SC_CACHE_SIZE) {
+    // Evict oldest entry (first key in insertion order)
+    const firstKey = SC_CACHE.keys().next().value;
+    SC_CACHE.delete(firstKey);
+  }
+  SC_CACHE.set(s, result);
+  return result;
+};
 
 // ─── Time helpers ─────────────────────────────────────────────
 function toISTString(ts) {
