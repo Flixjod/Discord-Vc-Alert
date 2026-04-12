@@ -79,39 +79,6 @@ fsp.readdir(TEMP_DIR)
 const PORT     = process.env.PORT || 8000;
 const OWNER_ID = process.env.OWNER_ID;
 
-// ─── Small-caps lookup (frozen for V8 optimisation) ──────────
-const SMALL_CAPS_MAP = Object.freeze({
-  a:"ᴀ",b:"ʙ",c:"ᴄ",d:"ᴅ",e:"ᴇ",f:"ꜰ",g:"ɢ",h:"ʜ",i:"ɪ",
-  j:"ᴊ",k:"ᴋ",l:"ʟ",m:"ᴍ",n:"ɴ",o:"ᴏ",p:"ᴘ",q:"ǫ",r:"ʀ",
-  s:"s",t:"ᴛ",u:"ᴜ",v:"ᴠ",w:"ᴡ",x:"x",y:"ʏ",z:"ᴢ",
-  A:"ᴀ",B:"ʙ",C:"ᴄ",D:"ᴅ",E:"ᴇ",F:"ꜰ",G:"ɢ",H:"ʜ",I:"ɪ",
-  J:"ᴊ",K:"ᴋ",L:"ʟ",M:"ᴍ",N:"ɴ",O:"ᴏ",P:"ᴘ",Q:"ǫ",R:"ʀ",
-  S:"s",T:"ᴛ",U:"ᴜ",V:"ᴠ",W:"ᴡ",X:"x",Y:"ʏ",Z:"ᴢ",
-  "0":"0","1":"1","2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9",
-  "!":"!","?":"?",".":".",",":",",":":":","'":"'",'"':'"',"-":" - ","_":"_"," ":" "
-});
-
-// Capped cache for sc() results to avoid repeated string splitting/mapping
-const SC_CACHE = new Map();
-const MAX_SC_CACHE_SIZE = 1000;
-
-const sc = (text = "") => {
-  const s = String(text);
-  if (!s) return "";
-  const cached = SC_CACHE.get(s);
-  if (cached) return cached;
-
-  const result = s.split("").map(ch => SMALL_CAPS_MAP[ch] ?? ch).join("");
-
-  if (SC_CACHE.size >= MAX_SC_CACHE_SIZE) {
-    // Evict oldest entry (first key in insertion order)
-    const firstKey = SC_CACHE.keys().next().value;
-    SC_CACHE.delete(firstKey);
-  }
-  SC_CACHE.set(s, result);
-  return result;
-};
-
 // ─── Time helpers ─────────────────────────────────────────────
 function toISTString(ts) {
   return new Date(ts).toLocaleString("en-IN", {
@@ -251,13 +218,13 @@ async function generateActivityFile(guild, logs) {
   const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
   const header =
 `╔══════════════════════════════════════════════╗
-║  🌌 ${sc(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ
-║  🗓️ ${sc(toISTString(Date.now()))}
+║  🌌 ${guild.name} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ
+║  🗓️ ${toISTString(Date.now())}
 ╚══════════════════════════════════════════════╝\n\n`;
   const body = logs.map(l => {
     const emoji  = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
     const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
-    return `${emoji} ${sc(l.type.toUpperCase())} — ${l.user} ${action} ${l.channel}\n    🕒 ${fancyAgo(Date.now() - l.time)} • ${toISTString(l.time)}\n`;
+    return `${emoji} ${l.type.toUpperCase()} — ${l.user} ${action} ${l.channel}\n    🕒 ${fancyAgo(Date.now() - l.time)} • ${toISTString(l.time)}\n`;
   }).join("\n");
   await fsp.writeFile(filePath, header + body, "utf8");
   return filePath;
@@ -286,10 +253,10 @@ const EmbedColors = Object.freeze({
 function makeEmbed({ title, description, color = EmbedColors.INFO, guild }) {
   return new EmbedBuilder()
     .setColor(color)
-    .setAuthor({ name: sc(title), iconURL: client.user?.displayAvatarURL() })
-    .setDescription(sc(description))
+    .setAuthor({ name: title, iconURL: client.user?.displayAvatarURL() })
+    .setDescription(description)
     .setFooter({
-      text: guild?.name ? sc(guild.name) : "ᴠᴄ ᴀʟᴇʀᴛ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ",
+      text: guild?.name ? guild.name : "ᴠᴄ ᴀʟᴇʀᴛ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ",
       iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user?.displayAvatarURL()
     })
     .setTimestamp();
@@ -300,7 +267,7 @@ function buildControlPanel(settings, guild) {
     .setColor(settings.alertsEnabled ? EmbedColors.SUCCESS : EmbedColors.ERROR)
     .setAuthor({ name: "🎛️ ᴠᴄ ᴀʟᴇʀᴛ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ", iconURL: client.user.displayAvatarURL() })
     .setDescription(
-      "**ʏᴏᴜʀ ᴄᴇɴᴛʀᴀʟ ʜᴜʙ ꜰᴏʀ ᴠᴏɪᴄᴇ ᴄʜᴀᴛ ᴀʟᴇʀᴛs!** ✨\ɴ\ɴ" +
+      "**ʏᴏᴜʀ ᴄᴇɴᴛʀᴀʟ ʜᴜʙ ꜰᴏʀ ᴠᴏɪᴄᴇ ᴄʜᴀᴛ ᴀʟᴇʀᴛs!** ✨\n\n" +
       `> ${"📢 ᴀʟᴇʀᴛs ᴄʜᴀɴɴᴇʟ:"} ${settings.textChannelId ? `<#${settings.textChannelId}>` : "ɴᴏᴛ sᴇᴛ"}\n` +
       `> ${"🔔 sᴛᴀᴛᴜs:"} ${settings.alertsEnabled ? "🟢 ᴀᴄᴛɪᴠᴇ" : "🔴 ᴅɪsᴀʙʟᴇᴅ"}\n` +
       `> ${"👋 ᴊᴏɪɴ ᴀʟᴇʀᴛs:"} ${settings.joinAlerts ? "✅ ᴏɴ" : "❌ ᴏꜰꜰ"}\n` +
@@ -311,7 +278,7 @@ function buildControlPanel(settings, guild) {
       `> ${"🧹 ᴀᴜᴛᴏ - ᴅᴇʟᴇᴛᴇ:"} ${settings.autoDelete ? "✅ ᴏɴ (30s)" : "❌ ᴏꜰꜰ"}\n\n` +
       "*ᴜsᴇ ᴛʜᴇ ʙᴜᴛᴛᴏɴs ʙᴇʟᴏᴡ ᴛᴏ ᴄᴏɴꜰɪɢᴜʀᴇ sᴇᴛᴛɪɴɢs.* ⚙️"
     )
-    .setFooter({ text: sc(guild?.name || `Server ID: ${settings.guildId}`), iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user.displayAvatarURL() })
+    .setFooter({ text: guild?.name || `Server ID: ${settings.guildId}`, iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user.displayAvatarURL() })
     .setTimestamp();
 
   const row1 = new ActionRowBuilder().addComponents(
@@ -497,7 +464,7 @@ async function sbPlayNext(guild, textChannel = null, retryCount = 0) {
         new EmbedBuilder()
           .setColor(EmbedColors.VC_JOIN)
           .setTitle("🎧 ɴᴏᴡ ᴘʟᴀʏɪɴɢ")
-          .setDescription(sc(`**${next.name}**`))
+          .setDescription(`**${next.name}**`)
           .setFooter({ text: `Volume: ${Math.round(q.volume * 100)}%` })
           .setTimestamp()
       ]
@@ -602,13 +569,13 @@ async function buildSoundPanelEmbed(guild) {
     .setColor(EmbedColors.VC_JOIN)
     .setAuthor({ name: "🎛 sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ", iconURL: client.user.displayAvatarURL() })
     .setDescription(
-      `${"> sᴛᴀᴛᴜs:"} ${sc(status)}\n` +
+      `${"> sᴛᴀᴛᴜs:"} ${status}\n` +
       `${"> ᴠᴏʟᴜᴍᴇ:"} ${Math.round(q.volume * 100)}%\n` +
-      `${"> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:"} ${sc(nowPlaying)}\n` +
+      `${"> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:"} ${nowPlaying}\n` +
       `${"> ᴛᴏᴛᴀʟ sᴏᴜɴᴅs:"} ${total}\n\n` +
-      `${"📜 ǫᴜᴇᴜᴇ:"}\n${sc(queueLines + moreText)}`
+      `${"📜 ǫᴜᴇᴜᴇ:"}\n${queueLines + moreText}`
     )
-    .setFooter({ text: sc(guild.name) })
+    .setFooter({ text: guild.name })
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
@@ -811,13 +778,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const botMember = await guild.members.fetch(client.user.id).catch(() => null);
           const perms     = channel.permissionsFor(botMember);
           if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages))
-            return interaction.reply({ embeds: [makeEmbed({ title: "🚫 ᴍɪssɪɴɢ ᴘᴇʀᴍɪssɪᴏɴs", description: sc(`i need view + send permissions in <#${channel.id}>`), color: EmbedColors.ERROR, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "🚫 ᴍɪssɪɴɢ ᴘᴇʀᴍɪssɪᴏɴs", description: `i need view + send permissions in <#${channel.id}>`, color: EmbedColors.ERROR, guild })], flags: 64 });
           if (settings.alertsEnabled && settings.textChannelId === channel.id)
-            return interaction.reply({ embeds: [makeEmbed({ title: "🟢 ᴀʟʀᴇᴀᴅʏ ᴀᴄᴛɪᴠᴇ", description: sc(`alerts already running in <#${channel.id}>`), color: EmbedColors.WARNING, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "🟢 ᴀʟʀᴇᴀᴅʏ ᴀᴄᴛɪᴠᴇ", description: `alerts already running in <#${channel.id}>`, color: EmbedColors.WARNING, guild })], flags: 64 });
           settings.alertsEnabled = true;
           settings.textChannelId = channel.id;
           updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: "✅ ᴠᴄ ᴀʟᴇʀᴛs ᴀᴄᴛɪᴠᴀᴛᴇᴅ", description: sc(`alerts will now appear in <#${channel.id}>`), color: EmbedColors.SUCCESS, guild })], flags: 64 });
+          return interaction.reply({ embeds: [makeEmbed({ title: "✅ ᴠᴄ ᴀʟᴇʀᴛs ᴀᴄᴛɪᴠᴀᴛᴇᴅ", description: `alerts will now appear in <#${channel.id}>`, color: EmbedColors.SUCCESS, guild })], flags: 64 });
         }
 
         // ─── /deactivate ─────────────────────────────────
@@ -838,10 +805,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             return interaction.reply({
               embeds: [makeEmbed({
                 title: "🙈 ɪɢɴᴏʀᴇ ʀᴏʟᴇ sᴇᴛᴛɪɴɢs",
-                description: sc(
+                description:
                   `**Status:** ${settings.ignoreRoleEnabled ? "🟢 Activated" : "🔴 Deactivated"}\n` +
-                  `**Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set"}`
-                ),
+                  `**Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set"}`,
                 color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.INFO, guild
               })],
               flags: 64
@@ -851,7 +817,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (!role) return interaction.reply({ embeds: [makeEmbed({ title: "⚠️ ʀᴏʟᴇ ʀᴇǫᴜɪʀᴇᴅ", description: "ᴘʀᴏᴠɪᴅᴇ ᴀ ʀᴏʟᴇ ᴡɪᴛʜ ᴛʜᴇ ʀᴏʟᴇ ᴏᴘᴛɪᴏɴ", color: EmbedColors.WARNING, guild })], flags: 64 });
             settings.ignoredRoleId = role.id; settings.ignoreRoleEnabled = true;
             updateGuildSettings(settings);
-            return interaction.reply({ embeds: [makeEmbed({ title: "✅ ɪɢɴᴏʀᴇ ʀᴏʟᴇ sᴇᴛ", description: sc(`Members with ${role} will be skipped in VC alerts`), color: EmbedColors.SUCCESS, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "✅ ɪɢɴᴏʀᴇ ʀᴏʟᴇ sᴇᴛ", description: `Members with ${role} will be skipped in VC alerts`, color: EmbedColors.SUCCESS, guild })], flags: 64 });
           }
           if (action === "reset") {
             if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: "ℹ️ ɴᴏ ʀᴏʟᴇ sᴇᴛ", description: "ɴᴏᴛʜɪɴɢ ᴛᴏ ʀᴇsᴇᴛ", color: EmbedColors.INFO, guild })], flags: 64 });
@@ -863,7 +829,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: "⚠️ ɴᴏ ʀᴏʟᴇ ᴄᴏɴꜰɪɢᴜʀᴇᴅ", description: "sᴇᴛ ᴀ ʀᴏʟᴇ ꜰɪʀsᴛ ᴡɪᴛʜ /ɪɢɴᴏʀᴇʀᴏʟᴇ ᴀᴄᴛɪᴏɴ:sᴇᴛ", color: EmbedColors.WARNING, guild })], flags: 64 });
             settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
             updateGuildSettings(settings);
-            return interaction.reply({ embeds: [makeEmbed({ title: sc(`${settings.ignoreRoleEnabled ? "✅" : "🔴"} ignore role ${settings.ignoreRoleEnabled ? "activated" : "deactivated"}`), description: sc(`Role: <@&${settings.ignoredRoleId}>`), color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: `${settings.ignoreRoleEnabled ? "✅" : "🔴"} ignore role ${settings.ignoreRoleEnabled ? "activated" : "deactivated"}`, description: `Role: <@&${settings.ignoredRoleId}>`, color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, guild })], flags: 64 });
           }
           break;
         }
@@ -930,7 +896,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING)
                 .setAuthor({ name: "👑 ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ", iconURL: client.user.displayAvatarURL() })
                 .setDescription(
-                  "💡 ᴜsᴇ ᴛʜɪs ɪɴ ᴅᴍ ꜰᴏʀ ᴛʜᴇ ꜰᴜʟʟ ᴅᴀsʜʙᴏᴀʀᴅ.\ɴ\ɴ" +
+                  "💡 ᴜsᴇ ᴛʜɪs ɪɴ ᴅᴍ ꜰᴏʀ ᴛʜᴇ ꜰᴜʟʟ ᴅᴀsʜʙᴏᴀʀᴅ.\n\n" +
                   `> 🌐 **Servers:** ${tg}\n> 👥 **Members:** ${tm.toLocaleString()}\n` +
                   `> 📡 **WS Ping:** ${client.ws.ping}ms\n> ⏱️ **Uptime:** ${Math.floor(up/86400)}d ${Math.floor((up%86400)/3600)}h ${Math.floor((up%3600)/60)}m`
                 )
@@ -1207,8 +1173,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 new EmbedBuilder()
                   .setColor(EmbedColors.WARNING)
                   .setAuthor({ name: "📡 ʀᴀᴅᴀʀ ᴇᴍᴘᴛʏ", iconURL: client.user.displayAvatarURL() })
-                  .setDescription(sc(`> ${why}`))
-                  .setFooter({ text: sc(guild.name) })
+                  .setDescription(`> ${why}`)
+                  .setFooter({ text: guild.name })
                   .setTimestamp()
               ]
             });
@@ -1266,8 +1232,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             )
             .setFooter({
               text: searchQuery
-                ? sc(`search: "${searchQuery}" • ${guild.name}`)
-                : sc(`top recommendations • ${guild.name}`)
+                ? `search: "${searchQuery}" • ${guild.name}`
+                : `top recommendations • ${guild.name}`
             })
             .setTimestamp();
 
@@ -1313,7 +1279,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const file = interaction.options.getAttachment("file");
             if (!file) return interaction.reply({ embeds: [makeEmbed({ title: "⚠ ɴᴏ ғɪʟᴇ", description: "ᴀᴛᴛᴀᴄʜ ᴀɴ ᴀᴜᴅɪᴏ ꜰɪʟᴇ", color: EmbedColors.WARNING, guild })], flags: 64 });
             if (await Sound.exists({ guildId, name }))
-              return interaction.reply({ embeds: [makeEmbed({ title: "⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs", description: sc(`**${name}** already exists`), color: EmbedColors.WARNING, guild })], flags: 64 });
+              return interaction.reply({ embeds: [makeEmbed({ title: "⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs", description: `**${name}** already exists`, color: EmbedColors.WARNING, guild })], flags: 64 });
             await interaction.deferReply({ flags: 64 });
             let storage = null;
             try { storage = await sbEnsureStorage(guild); } catch (e) { console.error("[sb storage]", e); }
@@ -1323,7 +1289,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               if (m) { uploadedUrl = m.attachments.first()?.url ?? uploadedUrl; storageMessageId = m.id; }
             }
             await Sound.create({ guildId, name, fileURL: uploadedUrl, storageMessageId, addedBy: interaction.user.id });
-            return interaction.editReply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("✅ sᴏᴜɴᴅ ᴀᴅᴅᴇᴅ").setDescription(sc(`**${name}** added`)).setTimestamp()] });
+            return interaction.editReply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("✅ sᴏᴜɴᴅ ᴀᴅᴅᴇᴅ").setDescription(`**${name}** added`).setTimestamp()] });
           }
 
           if (sub === "play") {
@@ -1336,10 +1302,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             q.list.push({ _id: sound._id, name: sound.name, fileURL: sound.fileURL, storageMessageId: sound.storageMessageId });
             if (isIdle) {
               await sbPlayNext(guild, interaction.channel);
-              return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("▶️ ɴᴏᴡ ᴘʟᴀʏɪɴɢ").setDescription(sc(`**${sound.name}**`)).setTimestamp()] });
+              return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("▶️ ɴᴏᴡ ᴘʟᴀʏɪɴɢ").setDescription(`**${sound.name}**`).setTimestamp()] });
             }
             sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("🎶 ǫᴜᴇᴜᴇᴅ").setDescription(sc(`**${sound.name}** at position #${q.list.length}`)).setTimestamp()] });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("🎶 ǫᴜᴇᴜᴇᴅ").setDescription(`**${sound.name}** at position #${q.list.length}`).setTimestamp()] });
           }
 
           if (sub === "volume") {
@@ -1347,14 +1313,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             q.volume = level / 100;
             if (q.resource?.volume) q.resource.volume.setVolume(q.volume);
             sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ").setDescription(sc(`Volume: **${level}%**`)).setTimestamp()], flags: 64 });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ").setDescription(`Volume: **${level}%**`).setTimestamp()], flags: 64 });
           }
 
           if (sub === "top") {
             const docs = await Sound.find({ guildId }).select("name playCount").sort({ playCount: -1 }).limit(10).lean();
             if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("📜 ᴇᴍᴘᴛʏ").setDescription("ɴᴏ sᴏᴜɴᴅs ᴘʟᴀʏᴇᴅ ʏᴇᴛ").setTimestamp()], flags: 64 });
             const text = docs.map((s, i) => `${"🥇🥈🥉"[i] ?? `\`#${i+1}\``} **${s.name}** — ${s.playCount} plays`).join("\n");
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🏆 ᴍᴏsᴛ ᴘᴏᴘᴜʟᴀʀ sᴏᴜɴᴅs").setDescription(sc(text)).setTimestamp()], flags: 64 });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🏆 ᴍᴏsᴛ ᴘᴏᴘᴜʟᴀʀ sᴏᴜɴᴅs").setDescription(text).setTimestamp()], flags: 64 });
           }
 
           if (sub === "delete") {
@@ -1371,7 +1337,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
             await doc.deleteOne();
             sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🗑 sᴏᴜɴᴅ ʀᴇᴍᴏᴠᴇᴅ").setDescription(sc(`**${name}** removed`)).setTimestamp()] });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🗑 sᴏᴜɴᴅ ʀᴇᴍᴏᴠᴇᴅ").setDescription(`**${name}** removed`).setTimestamp()] });
           }
 
           if (sub === "list") {
@@ -1379,7 +1345,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("📜 ᴇᴍᴘᴛʏ").setDescription("ɴᴏ sᴏᴜɴᴅs ᴀᴅᴅᴇᴅ").setTimestamp()], flags: 64 });
             const text = docs.slice(0, 40).map((s, i) => `\`${i+1}.\` **${s.name}** (${s.playCount} plays)`).join("\n");
             const more = docs.length > 40 ? `\n…and ${docs.length - 40} more` : "";
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("📜 sᴏᴜɴᴅ ʟɪsᴛ").setDescription(sc(text + more)).setFooter({ text: sc(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp()], flags: 64 });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("📜 sᴏᴜɴᴅ ʟɪsᴛ").setDescription(text + more).setFooter({ text: `${docs.length} sᴏᴜɴᴅs` }).setTimestamp()], flags: 64 });
           }
 
           if (sub === "panel") {
@@ -1485,7 +1451,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `Hey ${targetMember}! **${member.displayName}** wants you in **${vc.name}**.\n\n` +
                 `> *Don't leave them hanging — tap below to join the vibes!* 🎧`
               )
-              .setFooter({ text: sc(guild.name) })
+              .setFooter({ text: guild.name })
               .setTimestamp();
 
             await fallbackCh.send({

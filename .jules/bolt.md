@@ -1,3 +1,3 @@
-## 2025-05-22 - Zero-Overhead Static Labels
-**Learning:** While memoizing the `sc` function provides a ~70x speedup, static labels can be optimized further by hardcoding the pre-rendered small-caps strings directly in the source code. This eliminates function call overhead and cache lookups entirely for hot UI paths.
-**Action:** Replace static `sc("...")` calls with pre-rendered Unicode equivalents. Retain memoized `sc()` only for dynamic content (guild names, user tags, timestamps).
+## 2025-05-22 - Total Elimination of Formatting Layer
+**Learning:** For maximum performance and minimal memory footprint, the entire string transformation layer (`sc` function and `SMALL_CAPS_MAP`) can be eliminated. Static labels are pre-rendered as Unicode in the source, and dynamic content is served as standard text, reaching "Zero-Overhead" operation.
+**Action:** Remove `sc` function, `SMALL_CAPS_MAP` lookup, and `SC_CACHE`. Replace all static calls with Unicode and strip `sc()` from dynamic expressions.
