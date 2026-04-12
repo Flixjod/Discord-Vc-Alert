@@ -1,3 +1,3 @@
-## 2025-05-22 - Memoize Small-Caps Formatting
-**Learning:** The `sc` (small caps) function is a hot path used for formatting UI labels in Discord embeds and buttons. Since many of these labels are static or frequently repeated, re-calculating the mapping on every render is inefficient. Memoizing this function with a small LRU cache provides a ~70x speedup for repeated calls.
-**Action:** Use a capped `Map` to memoize string transformations in formatting helpers.
+## 2025-05-22 - Zero-Overhead Static Labels
+**Learning:** While memoizing the `sc` function provides a ~70x speedup, static labels can be optimized further by hardcoding the pre-rendered small-caps strings directly in the source code. This eliminates function call overhead and cache lookups entirely for hot UI paths.
+**Action:** Replace static `sc("...")` calls with pre-rendered Unicode equivalents. Retain memoized `sc()` only for dynamic content (guild names, user tags, timestamps).
