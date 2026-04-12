@@ -79,18 +79,7 @@ fsp.readdir(TEMP_DIR)
 const PORT     = process.env.PORT || 8000;
 const OWNER_ID = process.env.OWNER_ID;
 
-// ─── Small-caps lookup (frozen for V8 optimisation) ──────────
-const SMALL_CAPS_MAP = Object.freeze({
-  a:"ᴀ",b:"ʙ",c:"ᴄ",d:"ᴅ",e:"ᴇ",f:"ꜰ",g:"ɢ",h:"ʜ",i:"ɪ",
-  j:"ᴊ",k:"ᴋ",l:"ʟ",m:"ᴍ",n:"ɴ",o:"ᴏ",p:"ᴘ",q:"ǫ",r:"ʀ",
-  s:"s",t:"ᴛ",u:"ᴜ",v:"ᴠ",w:"ᴡ",x:"x",y:"ʏ",z:"ᴢ",
-  A:"ᴀ",B:"ʙ",C:"ᴄ",D:"ᴅ",E:"ᴇ",F:"ꜰ",G:"ɢ",H:"ʜ",I:"ɪ",
-  J:"ᴊ",K:"ᴋ",L:"ʟ",M:"ᴍ",N:"ɴ",O:"ᴏ",P:"ᴘ",Q:"ǫ",R:"ʀ",
-  S:"s",T:"ᴛ",U:"ᴜ",V:"ᴠ",W:"ᴡ",X:"x",Y:"ʏ",Z:"ᴢ",
-  "0":"0","1":"1","2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9",
-  "!":"!","?":"?",".":".",",":",",":":":","'":"'",'"':'"',"-":" - ","_":"_"," ":" "
-});
-const sc = (text = "") => String(text).split("").map(ch => SMALL_CAPS_MAP[ch] ?? ch).join("");
+
 
 // ─── Time helpers ─────────────────────────────────────────────
 function toISTString(ts) {
@@ -231,13 +220,13 @@ async function generateActivityFile(guild, logs) {
   const filePath = path.join(LOGS_DIR, `${guild.id}_activity.txt`);
   const header =
 `╔══════════════════════════════════════════════╗
-║  🌌 ${sc(guild.name)} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ
-║  🗓️ ${sc(toISTString(Date.now()))}
+║  🌌 ${guild.name} ᴀᴄᴛɪᴠɪᴛʏ ʟᴏɢꜱ
+║  🗓️ ${toISTString(Date.now())}
 ╚══════════════════════════════════════════════╝\n\n`;
   const body = logs.map(l => {
     const emoji  = l.type === "join" ? "🟢" : l.type === "leave" ? "🔴" : "💠";
     const action = l.type === "join" ? "entered" : l.type === "leave" ? "left" : "came online";
-    return `${emoji} ${sc(l.type.toUpperCase())} — ${l.user} ${action} ${l.channel}\n    🕒 ${fancyAgo(Date.now() - l.time)} • ${toISTString(l.time)}\n`;
+    return `${emoji} ${l.type.toUpperCase()} — ${l.user} ${action} ${l.channel}\n    🕒 ${fancyAgo(Date.now() - l.time)} • ${toISTString(l.time)}\n`;
   }).join("\n");
   await fsp.writeFile(filePath, header + body, "utf8");
   return filePath;
@@ -266,10 +255,10 @@ const EmbedColors = Object.freeze({
 function makeEmbed({ title, description, color = EmbedColors.INFO, guild }) {
   return new EmbedBuilder()
     .setColor(color)
-    .setAuthor({ name: sc(title), iconURL: client.user?.displayAvatarURL() })
-    .setDescription(sc(description))
+    .setAuthor({ name: title, iconURL: client.user?.displayAvatarURL() })
+    .setDescription(description)
     .setFooter({
-      text: guild?.name ? sc(guild.name) : sc("VC ALERT CONTROL PANEL"),
+      text: guild?.name ? guild.name : "ᴠᴄ ᴀʟᴇʀᴛ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ",
       iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user?.displayAvatarURL()
     })
     .setTimestamp();
@@ -278,32 +267,32 @@ function makeEmbed({ title, description, color = EmbedColors.INFO, guild }) {
 function buildControlPanel(settings, guild) {
   const embed = new EmbedBuilder()
     .setColor(settings.alertsEnabled ? EmbedColors.SUCCESS : EmbedColors.ERROR)
-    .setAuthor({ name: sc("🎛️ VC ALERT CONTROL PANEL"), iconURL: client.user.displayAvatarURL() })
+    .setAuthor({ name: "🎛️ ᴠᴄ ᴀʟᴇʀᴛ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ", iconURL: client.user.displayAvatarURL() })
     .setDescription(
-      sc("**Your Central Hub for Voice Chat Alerts!** ✨\n\n") +
-      `> ${sc("📢 Alerts Channel:")} ${settings.textChannelId ? `<#${settings.textChannelId}>` : sc("Not set")}\n` +
-      `> ${sc("🔔 Status:")} ${settings.alertsEnabled ? sc("🟢 Active") : sc("🔴 Disabled")}\n` +
-      `> ${sc("👋 Join Alerts:")} ${settings.joinAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
-      `> ${sc("🏃 Leave Alerts:")} ${settings.leaveAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
-      `> ${sc("🟢 Online Alerts:")} ${settings.onlineAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
-      `> ${sc("🪪 Private Alerts:")} ${settings.privateThreadAlerts ? sc("✅ On") : sc("❌ Off")}\n` +
-      `> ${sc("🙈 Ignored Role:")} ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? sc("✅ Active") : sc("❌ Inactive")})` : sc("None set")}\n` +
-      `> ${sc("🧹 Auto-Delete:")} ${settings.autoDelete ? sc("✅ On (30s)") : sc("❌ Off")}\n\n` +
-      sc("*Use the buttons below to configure settings.* ⚙️")
+      "**ʏᴏᴜʀ ᴄᴇɴᴛʀᴀʟ ʜᴜʙ ꜰᴏʀ ᴠᴏɪᴄᴇ ᴄʜᴀᴛ ᴀʟᴇʀᴛs!** ✨\ɴ\ɴ" +
+      `> ${"📢 ᴀʟᴇʀᴛs ᴄʜᴀɴɴᴇʟ:"} ${settings.textChannelId ? `<#${settings.textChannelId}>` : "ɴᴏᴛ sᴇᴛ"}\n` +
+      `> ${"🔔 sᴛᴀᴛᴜs:"} ${settings.alertsEnabled ? "🟢 ᴀᴄᴛɪᴠᴇ" : "🔴 ᴅɪsᴀʙʟᴇᴅ"}\n` +
+      `> ${"👋 ᴊᴏɪɴ ᴀʟᴇʀᴛs:"} ${settings.joinAlerts ? "✅ ᴏɴ" : "❌ ᴏꜰꜰ"}\n` +
+      `> ${"🏃 ʟᴇᴀᴠᴇ ᴀʟᴇʀᴛs:"} ${settings.leaveAlerts ? "✅ ᴏɴ" : "❌ ᴏꜰꜰ"}\n` +
+      `> ${"🟢 ᴏɴʟɪɴᴇ ᴀʟᴇʀᴛs:"} ${settings.onlineAlerts ? "✅ ᴏɴ" : "❌ ᴏꜰꜰ"}\n` +
+      `> ${"🪪 ᴘʀɪᴠᴀᴛᴇ ᴀʟᴇʀᴛs:"} ${settings.privateThreadAlerts ? "✅ ᴏɴ" : "❌ ᴏꜰꜰ"}\n` +
+      `> ${"🙈 ɪɢɴᴏʀᴇᴅ ʀᴏʟᴇ:"} ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}> (${settings.ignoreRoleEnabled ? "✅ ᴀᴄᴛɪᴠᴇ" : "❌ ɪɴᴀᴄᴛɪᴠᴇ"})` : "ɴᴏɴᴇ sᴇᴛ"}\n` +
+      `> ${"🧹 ᴀᴜᴛᴏ - ᴅᴇʟᴇᴛᴇ:"} ${settings.autoDelete ? "✅ ᴏɴ (30s)" : "❌ ᴏꜰꜰ"}\n\n` +
+      "*ᴜsᴇ ᴛʜᴇ ʙᴜᴛᴛᴏɴs ʙᴇʟᴏᴡ ᴛᴏ ᴄᴏɴꜰɪɢᴜʀᴇ sᴇᴛᴛɪɴɢs.* ⚙️"
     )
-    .setFooter({ text: sc(guild?.name || `Server ID: ${settings.guildId}`), iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user.displayAvatarURL() })
+    .setFooter({ text: guild?.name || `Server ID: ${settings.guildId}`, iconURL: guild?.iconURL?.({ dynamic: true }) ?? client.user.displayAvatarURL() })
     .setTimestamp();
 
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("toggleJoinAlerts").setLabel(sc("👋 Join")).setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("toggleLeaveAlerts").setLabel(sc("🏃 Leave")).setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("toggleOnlineAlerts").setLabel(sc("🟢 Online")).setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("toggleJoinAlerts").setLabel("👋 ᴊᴏɪɴ").setStyle(settings.joinAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleLeaveAlerts").setLabel("🏃 ʟᴇᴀᴠᴇ").setStyle(settings.leaveAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleOnlineAlerts").setLabel("🟢 ᴏɴʟɪɴᴇ").setStyle(settings.onlineAlerts ? ButtonStyle.Primary : ButtonStyle.Secondary)
   );
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("togglePrivateThreads").setLabel(sc("🪪 Private Alerts")).setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("toggleIgnoreRole").setLabel(sc("🙈 Ignore Alerts")).setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("toggleAutoDelete").setLabel(sc("🧹 Auto-Delete")).setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("resetSettings").setLabel(sc("♻️ Reset Settings")).setStyle(ButtonStyle.Danger)
+    new ButtonBuilder().setCustomId("togglePrivateThreads").setLabel("🪪 ᴘʀɪᴠᴀᴛᴇ ᴀʟᴇʀᴛs").setStyle(settings.privateThreadAlerts ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleIgnoreRole").setLabel("🙈 ɪɢɴᴏʀᴇ ᴀʟᴇʀᴛs").setStyle(settings.ignoreRoleEnabled ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("toggleAutoDelete").setLabel("🧹 ᴀᴜᴛᴏ - ᴅᴇʟᴇᴛᴇ").setStyle(settings.autoDelete ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("resetSettings").setLabel("♻️ ʀᴇsᴇᴛ sᴇᴛᴛɪɴɢs").setStyle(ButtonStyle.Danger)
   );
   return { embed, buttons: [row1, row2] };
 }
@@ -476,8 +465,8 @@ async function sbPlayNext(guild, textChannel = null, retryCount = 0) {
       embeds: [
         new EmbedBuilder()
           .setColor(EmbedColors.VC_JOIN)
-          .setTitle(sc("🎧 ɴᴏᴡ ᴘʟᴀʏɪɴɢ"))
-          .setDescription(sc(`**${next.name}**`))
+          .setTitle("🎧 ɴᴏᴡ ᴘʟᴀʏɪɴɢ")
+          .setDescription(`**${next.name}**`)
           .setFooter({ text: `Volume: ${Math.round(q.volume * 100)}%` })
           .setTimestamp()
       ]
@@ -575,27 +564,27 @@ async function buildSoundPanelEmbed(guild) {
   const conn  = getVoiceConnection(guild.id);
   const status    = q.now ? "🟢 ᴘʟᴀʏɪɴɢ" : (conn ? "🟡 ᴄᴏɴɴᴇᴄᴛᴇᴅ" : "🔴 ɪᴅʟᴇ");
   const nowPlaying = q.now ? `🎧 ${q.now.name}` : "—";
-  const queueLines = q.list.slice(0, 8).map((s, i) => `\`${i + 1}.\` ${s.name}`).join("\n") || sc("ɴᴏ ǫᴜᴇᴜᴇᴅ sᴏᴜɴᴅs");
+  const queueLines = q.list.slice(0, 8).map((s, i) => `\`${i + 1}.\` ${s.name}`).join("\n") || "ɴᴏ ǫᴜᴇᴜᴇᴅ sᴏᴜɴᴅs";
   const moreText   = q.list.length > 8 ? `\n…and ${q.list.length - 8} more` : "";
 
   const embed = new EmbedBuilder()
     .setColor(EmbedColors.VC_JOIN)
-    .setAuthor({ name: sc("🎛 sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ"), iconURL: client.user.displayAvatarURL() })
+    .setAuthor({ name: "🎛 sᴏᴜɴᴅʙᴏᴀʀᴅ ᴘᴀɴᴇʟ", iconURL: client.user.displayAvatarURL() })
     .setDescription(
-      `${sc("> sᴛᴀᴛᴜs:")} ${sc(status)}\n` +
-      `${sc("> ᴠᴏʟᴜᴍᴇ:")} ${Math.round(q.volume * 100)}%\n` +
-      `${sc("> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:")} ${sc(nowPlaying)}\n` +
-      `${sc("> ᴛᴏᴛᴀʟ sᴏᴜɴᴅs:")} ${total}\n\n` +
-      `${sc("📜 ǫᴜᴇᴜᴇ:")}\n${sc(queueLines + moreText)}`
+      `${"> sᴛᴀᴛᴜs:"} ${status}\n` +
+      `${"> ᴠᴏʟᴜᴍᴇ:"} ${Math.round(q.volume * 100)}%\n` +
+      `${"> ɴᴏᴡ ᴘʟᴀʏɪɴɢ:"} ${nowPlaying}\n` +
+      `${"> ᴛᴏᴛᴀʟ sᴏᴜɴᴅs:"} ${total}\n\n` +
+      `${"📜 ǫᴜᴇᴜᴇ:"}\n${queueLines + moreText}`
     )
-    .setFooter({ text: sc(guild.name) })
+    .setFooter({ text: guild.name })
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("sb_connect").setLabel(sc("🎧 ᴄᴏɴɴᴇᴄᴛ")).setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId("sb_skip").setLabel(sc("⏭ sᴋɪᴘ")).setStyle(ButtonStyle.Secondary).setDisabled(!q.now),
-    new ButtonBuilder().setCustomId("sb_stop").setLabel(sc("⛔ sᴛᴏᴘ")).setStyle(ButtonStyle.Danger).setDisabled(!q.now),
-    new ButtonBuilder().setCustomId("sb_refresh").setLabel(sc("ʀᴇꜰʀᴇsʜ")).setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("sb_connect").setLabel("🎧 ᴄᴏɴɴᴇᴄᴛ").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("sb_skip").setLabel("⏭ sᴋɪᴘ").setStyle(ButtonStyle.Secondary).setDisabled(!q.now),
+    new ButtonBuilder().setCustomId("sb_stop").setLabel("⛔ sᴛᴏᴘ").setStyle(ButtonStyle.Danger).setDisabled(!q.now),
+    new ButtonBuilder().setCustomId("sb_refresh").setLabel("ʀᴇꜰʀᴇsʜ").setStyle(ButtonStyle.Secondary)
   );
   return { embed, buttons: [row] };
 }
@@ -787,26 +776,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 ? (guild.channels.cache.get(settings.textChannelId) ?? await guild.channels.fetch(settings.textChannelId).catch(() => null))
                 : interaction.channel);
           if (!channel || channel.type !== ChannelType.GuildText)
-            return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠️ invalid channel"), description: sc("please choose a text channel"), color: EmbedColors.ERROR, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "⚠️ ɪɴᴠᴀʟɪᴅ ᴄʜᴀɴɴᴇʟ", description: "ᴘʟᴇᴀsᴇ ᴄʜᴏᴏsᴇ ᴀ ᴛᴇxᴛ ᴄʜᴀɴɴᴇʟ", color: EmbedColors.ERROR, guild })], flags: 64 });
           const botMember = await guild.members.fetch(client.user.id).catch(() => null);
           const perms     = channel.permissionsFor(botMember);
           if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages))
-            return interaction.reply({ embeds: [makeEmbed({ title: sc("🚫 missing permissions"), description: sc(`i need view + send permissions in <#${channel.id}>`), color: EmbedColors.ERROR, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "🚫 ᴍɪssɪɴɢ ᴘᴇʀᴍɪssɪᴏɴs", description: `i need view + send permissions in <#${channel.id}>`, color: EmbedColors.ERROR, guild })], flags: 64 });
           if (settings.alertsEnabled && settings.textChannelId === channel.id)
-            return interaction.reply({ embeds: [makeEmbed({ title: sc("🟢 already active"), description: sc(`alerts already running in <#${channel.id}>`), color: EmbedColors.WARNING, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "🟢 ᴀʟʀᴇᴀᴅʏ ᴀᴄᴛɪᴠᴇ", description: `alerts already running in <#${channel.id}>`, color: EmbedColors.WARNING, guild })], flags: 64 });
           settings.alertsEnabled = true;
           settings.textChannelId = channel.id;
           updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: sc("✅ vc alerts activated"), description: sc(`alerts will now appear in <#${channel.id}>`), color: EmbedColors.SUCCESS, guild })], flags: 64 });
+          return interaction.reply({ embeds: [makeEmbed({ title: "✅ ᴠᴄ ᴀʟᴇʀᴛs ᴀᴄᴛɪᴠᴀᴛᴇᴅ", description: `alerts will now appear in <#${channel.id}>`, color: EmbedColors.SUCCESS, guild })], flags: 64 });
         }
 
         // ─── /deactivate ─────────────────────────────────
         case "deactivate": {
           if (!settings.alertsEnabled)
-            return interaction.reply({ embeds: [makeEmbed({ title: sc("💤 already off"), description: sc("use /activate to re-enable"), color: EmbedColors.WARNING, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "💤 ᴀʟʀᴇᴀᴅʏ ᴏꜰꜰ", description: "ᴜsᴇ /ᴀᴄᴛɪᴠᴀᴛᴇ ᴛᴏ ʀᴇ - ᴇɴᴀʙʟᴇ", color: EmbedColors.WARNING, guild })], flags: 64 });
           settings.alertsEnabled = false;
           updateGuildSettings(settings);
-          return interaction.reply({ embeds: [makeEmbed({ title: sc("🔕 vc alerts powered down"), description: sc("no alerts until you /activate again"), color: EmbedColors.ERROR, guild })], flags: 64 });
+          return interaction.reply({ embeds: [makeEmbed({ title: "🔕 ᴠᴄ ᴀʟᴇʀᴛs ᴘᴏᴡᴇʀᴇᴅ ᴅᴏᴡɴ", description: "ɴᴏ ᴀʟᴇʀᴛs ᴜɴᴛɪʟ ʏᴏᴜ /ᴀᴄᴛɪᴠᴀᴛᴇ ᴀɢᴀɪɴ", color: EmbedColors.ERROR, guild })], flags: 64 });
         }
 
         // ─── /ignorerole ─────────────────────────────────
@@ -817,33 +806,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (action === "view") {
             return interaction.reply({
               embeds: [makeEmbed({
-                title: sc("🙈 ignore role settings"),
-                description: sc(
-                  `**Status:** ${settings.ignoreRoleEnabled ? "🟢 Activated" : "🔴 Deactivated"}\n` +
-                  `**Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set"}`
-                ),
+                title: "🙈 ɪɢɴᴏʀᴇ ʀᴏʟᴇ sᴇᴛᴛɪɴɢs",
+                description: `**Status:** ${settings.ignoreRoleEnabled ? "🟢 Activated" : "🔴 Deactivated"}\n` +
+                  `**Ignored Role:** ${settings.ignoredRoleId ? `<@&${settings.ignoredRoleId}>` : "None set"}`,
                 color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.INFO, guild
               })],
               flags: 64
             });
           }
           if (action === "set") {
-            if (!role) return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠️ role required"), description: sc("provide a role with the role option"), color: EmbedColors.WARNING, guild })], flags: 64 });
+            if (!role) return interaction.reply({ embeds: [makeEmbed({ title: "⚠️ ʀᴏʟᴇ ʀᴇǫᴜɪʀᴇᴅ", description: "ᴘʀᴏᴠɪᴅᴇ ᴀ ʀᴏʟᴇ ᴡɪᴛʜ ᴛʜᴇ ʀᴏʟᴇ ᴏᴘᴛɪᴏɴ", color: EmbedColors.WARNING, guild })], flags: 64 });
             settings.ignoredRoleId = role.id; settings.ignoreRoleEnabled = true;
             updateGuildSettings(settings);
-            return interaction.reply({ embeds: [makeEmbed({ title: sc("✅ ignore role set"), description: sc(`Members with ${role} will be skipped in VC alerts`), color: EmbedColors.SUCCESS, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "✅ ɪɢɴᴏʀᴇ ʀᴏʟᴇ sᴇᴛ", description: `Members with ${role} will be skipped in VC alerts`, color: EmbedColors.SUCCESS, guild })], flags: 64 });
           }
           if (action === "reset") {
-            if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: sc("ℹ️ no role set"), description: sc("Nothing to reset"), color: EmbedColors.INFO, guild })], flags: 64 });
+            if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: "ℹ️ ɴᴏ ʀᴏʟᴇ sᴇᴛ", description: "ɴᴏᴛʜɪɴɢ ᴛᴏ ʀᴇsᴇᴛ", color: EmbedColors.INFO, guild })], flags: 64 });
             settings.ignoredRoleId = null; settings.ignoreRoleEnabled = false;
             updateGuildSettings(settings);
-            return interaction.reply({ embeds: [makeEmbed({ title: sc("♻️ ignore role reset"), description: sc("All members will appear in VC alerts again"), color: EmbedColors.RESET, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: "♻️ ɪɢɴᴏʀᴇ ʀᴏʟᴇ ʀᴇsᴇᴛ", description: "ᴀʟʟ ᴍᴇᴍʙᴇʀs ᴡɪʟʟ ᴀᴘᴘᴇᴀʀ ɪɴ ᴠᴄ ᴀʟᴇʀᴛs ᴀɢᴀɪɴ", color: EmbedColors.RESET, guild })], flags: 64 });
           }
           if (action === "toggle") {
-            if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠️ no role configured"), description: sc("Set a role first with /ignorerole action:set"), color: EmbedColors.WARNING, guild })], flags: 64 });
+            if (!settings.ignoredRoleId) return interaction.reply({ embeds: [makeEmbed({ title: "⚠️ ɴᴏ ʀᴏʟᴇ ᴄᴏɴꜰɪɢᴜʀᴇᴅ", description: "sᴇᴛ ᴀ ʀᴏʟᴇ ꜰɪʀsᴛ ᴡɪᴛʜ /ɪɢɴᴏʀᴇʀᴏʟᴇ ᴀᴄᴛɪᴏɴ:sᴇᴛ", color: EmbedColors.WARNING, guild })], flags: 64 });
             settings.ignoreRoleEnabled = !settings.ignoreRoleEnabled;
             updateGuildSettings(settings);
-            return interaction.reply({ embeds: [makeEmbed({ title: sc(`${settings.ignoreRoleEnabled ? "✅" : "🔴"} ignore role ${settings.ignoreRoleEnabled ? "activated" : "deactivated"}`), description: sc(`Role: <@&${settings.ignoredRoleId}>`), color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, guild })], flags: 64 });
+            return interaction.reply({ embeds: [makeEmbed({ title: `${settings.ignoreRoleEnabled ? "✅" : "🔴"} ignore role ${settings.ignoreRoleEnabled ? "activated" : "deactivated"}`, description: `Role: <@&${settings.ignoredRoleId}>`, color: settings.ignoreRoleEnabled ? EmbedColors.SUCCESS : EmbedColors.WARNING, guild })], flags: 64 });
           }
           break;
         }
@@ -853,7 +840,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.deferReply({ flags: 64 });
           const targetUser = interaction.options.getUser("user") || interaction.user;
           const member     = await guild.members.fetch(targetUser.id).catch(() => null);
-          if (!member) return interaction.editReply({ embeds: [makeEmbed({ title: sc("❌ user not found"), description: sc("This user is not in the server."), color: EmbedColors.ERROR, guild })] });
+          if (!member) return interaction.editReply({ embeds: [makeEmbed({ title: "❌ ᴜsᴇʀ ɴᴏᴛ ꜰᴏᴜɴᴅ", description: "ᴛʜɪs ᴜsᴇʀ ɪs ɴᴏᴛ ɪɴ ᴛʜᴇ sᴇʀᴠᴇʀ.", color: EmbedColors.ERROR, guild })] });
 
           const createdStr   = new Date(targetUser.createdTimestamp).toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric", timeZone:"Asia/Kolkata" });
           const daysSinceCr  = Math.floor((Date.now() - targetUser.createdTimestamp) / 86_400_000);
@@ -900,7 +887,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ─── /owner ───────────────────────────────────────
         case "owner": {
           const isOwner = OWNER_ID && interaction.user.id === OWNER_ID;
-          if (!isOwner) return interaction.reply({ embeds: [makeEmbed({ title: sc("🚫 ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"), description: sc("Owner only command."), color: EmbedColors.ERROR, guild })], flags: 64 });
+          if (!isOwner) return interaction.reply({ embeds: [makeEmbed({ title: "🚫 ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ", description: "ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.", color: EmbedColors.ERROR, guild })], flags: 64 });
 
           if (interaction.guild) {
             const tg = client.guilds.cache.size;
@@ -908,13 +895,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const up = Math.floor(process.uptime());
             return interaction.reply({
               embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING)
-                .setAuthor({ name: sc("👑 ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
+                .setAuthor({ name: "👑 ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ", iconURL: client.user.displayAvatarURL() })
                 .setDescription(
-                  sc("💡 Use this in DM for the full dashboard.\n\n") +
+                  "💡 ᴜsᴇ ᴛʜɪs ɪɴ ᴅM ꜰᴏʀ ᴛʜᴇ ꜰᴜʟʟ ᴅᴀsʜʙᴏᴀʀᴅ.\ɴ\ɴ" +
                   `> 🌐 **Servers:** ${tg}\n> 👥 **Members:** ${tm.toLocaleString()}\n` +
                   `> 📡 **WS Ping:** ${client.ws.ping}ms\n> ⏱️ **Uptime:** ${Math.floor(up/86400)}d ${Math.floor((up%86400)/3600)}h ${Math.floor((up%3600)/60)}m`
                 )
-                .setFooter({ text: sc("dm the bot for full analytics") }).setTimestamp()
+                .setFooter({ text: "ᴅᴍ ᴛʜᴇ ʙᴏᴛ ꜰᴏʀ ꜰᴜʟʟ ᴀɴᴀʟʏᴛɪᴄs" }).setTimestamp()
               ],
               flags: 64
             });
@@ -947,7 +934,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           return interaction.editReply({
             embeds: [new EmbedBuilder().setColor(EmbedColors.INFO)
-              .setAuthor({ name: sc("👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ"), iconURL: client.user.displayAvatarURL() })
+              .setAuthor({ name: "👑 ʙᴏᴛ ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ", iconURL: client.user.displayAvatarURL() })
               .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
               .setDescription(
                 `> 🤖 **Bot:** ${client.user.username}\n> 🟢 **Status:** Online\n` +
@@ -955,16 +942,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `> 📡 **WS Ping:** ${client.ws.ping}ms`
               )
               .addFields(
-                { name: sc("📊 ɢʟᴏʙᴀʟ sᴛᴀᴛs"),
+                { name: "📊 ɢʟᴏʙᴀʟ sᴛᴀᴛs",
                   value: `🌐 **Servers:** ${totalGuilds}\n👥 **Members:** ${totalMembers.toLocaleString()}\n✅ **Active Guilds:** ${activeGuilds}/${totalSettings}\n🔊 **Sounds:** ${totalSounds}`, inline:true },
-                { name: sc("⚡ ʟᴀsᴛ 24ʜ"),
+                { name: "⚡ ʟᴀsᴛ 24ʜ",
                   value: `📈 **Events:** ${recentLogsCount.toLocaleString()}\n🟢 **Joins:** ${joinCount24h}\n🔴 **Leaves:** ${leaveCount24h}\n💠 **Online:** ${onlineCount24h}`, inline:true },
-                { name: sc("💾 sʏsᴛᴇᴍ"),
+                { name: "💾 sʏsᴛᴇᴍ",
                   value: `🧠 **Heap:** ${(mem.heapUsed/1048576).toFixed(2)}MB / ${(mem.heapTotal/1048576).toFixed(2)}MB\n⚙️ **Node:** ${process.version}\n🖥️ **Platform:** ${process.platform} ${process.arch}\n📜 **DB Logs:** ${totalLogs.toLocaleString()}`, inline:false },
-                { name: sc("🏆 ᴛᴏᴘ sᴇʀᴠᴇʀs"), value: topGuilds || "—", inline:false },
-                { name: sc("🔥 ᴍᴏsᴛ ᴀᴄᴛɪᴠᴇ (24ʜ)"), value: guildActivity.map((g, i) => `${i+1}. **${g.name ?? g._id}** — ${g.count} events`).join("\n") || sc("no activity"), inline:false }
+                { name: "🏆 ᴛᴏᴘ sᴇʀᴠᴇʀs", value: topGuilds || "—", inline:false },
+                { name: "🔥 ᴍᴏsᴛ ᴀᴄᴛɪᴠᴇ (24ʜ)", value: guildActivity.map((g, i) => `${i+1}. **${g.name ?? g._id}** — ${g.count} events`).join("\n") || "ɴᴏ ᴀᴄᴛɪᴠɪᴛʏ", inline:false }
               )
-              .setFooter({ text: sc("owner dashboard • confidential") }).setTimestamp()
+              .setFooter({ text: "ᴏᴡɴᴇʀ ᴅᴀsʜʙᴏᴀʀᴅ • ᴄᴏɴꜰɪᴅᴇɴᴛɪᴀʟ" }).setTimestamp()
             ]
           });
         }
@@ -1186,9 +1173,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
               embeds: [
                 new EmbedBuilder()
                   .setColor(EmbedColors.WARNING)
-                  .setAuthor({ name: sc("📡 ʀᴀᴅᴀʀ ᴇᴍᴘᴛʏ"), iconURL: client.user.displayAvatarURL() })
-                  .setDescription(sc(`> ${why}`))
-                  .setFooter({ text: sc(guild.name) })
+                  .setAuthor({ name: "📡 ʀᴀᴅᴀʀ ᴇᴍᴘᴛʏ", iconURL: client.user.displayAvatarURL() })
+                  .setDescription(`> ${why}`)
+                  .setFooter({ text: guild.name })
                   .setTimestamp()
               ]
             });
@@ -1217,7 +1204,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const statusLabel = { online: "Online", idle: "Idle", dnd: "Do Not Disturb" }[m.presence?.status] ?? "Offline";
             descBody = 
               `🎯 **${m.displayName}** ${dot}\n` +
-              `> ${sc("sᴛᴀᴛᴜs:")} **${statusLabel}**\n` +
+              `> ${"sᴛᴀᴛᴜs:"} **${statusLabel}**\n` +
               (loc ? `> 📡 ${loc}` : `> ✨ *Ready to be invited*`);
           } else {
             // Multi-user layout: Sleek, scannable guest list
@@ -1232,22 +1219,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           // ── VC context header ─────────────────────────────────────────────
           const headerLine = invokerVC
-            ? `${sc("📍 ᴄᴜʀʀᴇɴᴛ ᴠᴄ:")} **${invokerVC.name}** 👥 \`${invokerVC.members.size} inside\``
-            : `⚠️ ${sc("Join a voice channel first to send targeted invites.")}`;
+            ? `${"📍 ᴄᴜʀʀᴇɴᴛ ᴠᴄ:"} **${invokerVC.name}** 👥 \`${invokerVC.members.size} inside\``
+            : `⚠️ ${"ᴊᴏɪɴ ᴀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ ꜰɪʀsᴛ ᴛᴏ sᴇɴᴅ ᴛᴀʀɢᴇᴛᴇᴅ ɪɴᴠɪᴛᴇs."}`;
 
           const invEmbed = new EmbedBuilder()
             .setColor(EmbedColors.VC_JOIN)
-            .setAuthor({ name: sc("📨 ᴠᴏɪᴄᴇ ɪɴᴠɪᴛᴇ sʏsᴛᴇᴍ"), iconURL: client.user.displayAvatarURL() })
+            .setAuthor({ name: "📨 ᴠᴏɪᴄᴇ ɪɴᴠɪᴛᴇ sʏsᴛᴇᴍ", iconURL: client.user.displayAvatarURL() })
             .setDescription(
               `${headerLine}\n\n` +
               (isSingleUser
-                ? `${sc("▼ sᴇʟᴇᴄᴛᴇᴅ ᴛᴀʀɢᴇᴛ:")}\n${descBody}`
-                : `${sc("▼ ᴠɪᴘ ɢᴜᴇsᴛ ʟɪsᴛ:")}\n${descBody}`)
+                ? `${"▼ sᴇʟᴇᴄᴛᴇᴅ ᴛᴀʀɢᴇᴛ:"}\n${descBody}`
+                : `${"▼ ᴠɪᴘ ɢᴜᴇsᴛ ʟɪsᴛ:"}\n${descBody}`)
             )
             .setFooter({
               text: searchQuery
-                ? sc(`search: "${searchQuery}" • ${guild.name}`)
-                : sc(`top recommendations • ${guild.name}`)
+                ? `search: "${searchQuery}" • ${guild.name}`
+                : `top recommendations • ${guild.name}`
             })
             .setTimestamp();
 
@@ -1259,7 +1246,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               btnCandidates.map(m =>
                 new ButtonBuilder()
                   .setCustomId(`inv_notify_${m.id}_${invokerVC.id}`)
-                  .setLabel(isSingleUser ? sc("sᴇɴᴅ ɪɴᴠɪᴛᴇ") : m.displayName.slice(0, 25))
+                  .setLabel(isSingleUser ? "sᴇɴᴅ ɪɴᴠɪᴛᴇ" : m.displayName.slice(0, 25))
                   .setStyle(isSingleUser ? ButtonStyle.Success : ButtonStyle.Primary)
                   .setEmoji(isSingleUser ? "✨" : "📨")
               )
@@ -1270,7 +1257,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                   .setCustomId("inv_no_vc_info")
-                  .setLabel(sc("ᴊᴏɪɴ ᴀ ᴠᴄ ᴛᴏ ɪɴᴠɪᴛᴇ"))
+                  .setLabel("ᴊᴏɪɴ ᴀ ᴠᴄ ᴛᴏ ɪɴᴠɪᴛᴇ")
                   .setStyle(ButtonStyle.Secondary)
                   .setDisabled(true)
               )
@@ -1288,12 +1275,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           if (sub === "add") {
             if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild))
-              return interaction.reply({ embeds: [makeEmbed({ title: sc("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: sc("admins only"), color: EmbedColors.ERROR, guild })], flags: 64 });
+              return interaction.reply({ embeds: [makeEmbed({ title: "❌ ᴘᴇʀᴍɪssɪᴏɴ", description: "ᴀᴅᴍɪɴs ᴏɴʟʏ", color: EmbedColors.ERROR, guild })], flags: 64 });
             const name = interaction.options.getString("name");
             const file = interaction.options.getAttachment("file");
-            if (!file) return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠ ɴᴏ ғɪʟᴇ"), description: sc("attach an audio file"), color: EmbedColors.WARNING, guild })], flags: 64 });
+            if (!file) return interaction.reply({ embeds: [makeEmbed({ title: "⚠ ɴᴏ ғɪʟᴇ", description: "ᴀᴛᴛᴀᴄʜ ᴀɴ ᴀᴜᴅɪᴏ ꜰɪʟᴇ", color: EmbedColors.WARNING, guild })], flags: 64 });
             if (await Sound.exists({ guildId, name }))
-              return interaction.reply({ embeds: [makeEmbed({ title: sc("⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs"), description: sc(`**${name}** already exists`), color: EmbedColors.WARNING, guild })], flags: 64 });
+              return interaction.reply({ embeds: [makeEmbed({ title: "⚠ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs", description: `**${name}** already exists`, color: EmbedColors.WARNING, guild })], flags: 64 });
             await interaction.deferReply({ flags: 64 });
             let storage = null;
             try { storage = await sbEnsureStorage(guild); } catch (e) { console.error("[sb storage]", e); }
@@ -1303,23 +1290,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
               if (m) { uploadedUrl = m.attachments.first()?.url ?? uploadedUrl; storageMessageId = m.id; }
             }
             await Sound.create({ guildId, name, fileURL: uploadedUrl, storageMessageId, addedBy: interaction.user.id });
-            return interaction.editReply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("✅ sᴏᴜɴᴅ ᴀᴅᴅᴇᴅ")).setDescription(sc(`**${name}** added`)).setTimestamp()] });
+            return interaction.editReply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("✅ sᴏᴜɴᴅ ᴀᴅᴅᴇᴅ").setDescription(`**${name}** added`).setTimestamp()] });
           }
 
           if (sub === "play") {
             const name  = interaction.options.getString("name");
             const sound = await Sound.findOne({ guildId, name }).lean();
-            if (!sound) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(sc("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(sc("sound not found")).setTimestamp()], flags: 64 });
+            if (!sound) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle("❌ ɴᴏᴛ ғᴏᴜɴᴅ").setDescription("sᴏᴜɴᴅ ɴᴏᴛ ꜰᴏᴜɴᴅ").setTimestamp()], flags: 64 });
             const res = await sbConnectToMember(interaction.member);
-            if (res?.error) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(sc("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ")).setDescription(sc("join a voice channel first")).setTimestamp()], flags: 64 });
+            if (res?.error) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ").setDescription("ᴊᴏɪɴ ᴀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ ꜰɪʀsᴛ").setTimestamp()], flags: 64 });
             const isIdle = !q.now;
             q.list.push({ _id: sound._id, name: sound.name, fileURL: sound.fileURL, storageMessageId: sound.storageMessageId });
             if (isIdle) {
               await sbPlayNext(guild, interaction.channel);
-              return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("▶️ ɴᴏᴡ ᴘʟᴀʏɪɴɢ")).setDescription(sc(`**${sound.name}**`)).setTimestamp()] });
+              return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("▶️ ɴᴏᴡ ᴘʟᴀʏɪɴɢ").setDescription(`**${sound.name}**`).setTimestamp()] });
             }
             sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("🎶 ǫᴜᴇᴜᴇᴅ")).setDescription(sc(`**${sound.name}** at position #${q.list.length}`)).setTimestamp()] });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("🎶 ǫᴜᴇᴜᴇᴅ").setDescription(`**${sound.name}** at position #${q.list.length}`).setTimestamp()] });
           }
 
           if (sub === "volume") {
@@ -1327,21 +1314,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
             q.volume = level / 100;
             if (q.resource?.volume) q.resource.volume.setVolume(q.volume);
             sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ")).setDescription(sc(`Volume: **${level}%**`)).setTimestamp()], flags: 64 });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ").setDescription(`Volume: **${level}%**`).setTimestamp()], flags: 64 });
           }
 
           if (sub === "top") {
             const docs = await Sound.find({ guildId }).select("name playCount").sort({ playCount: -1 }).limit(10).lean();
-            if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("📜 ᴇᴍᴘᴛʏ")).setDescription(sc("no sounds played yet")).setTimestamp()], flags: 64 });
+            if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("📜 ᴇᴍᴘᴛʏ").setDescription("ɴᴏ sᴏᴜɴᴅs ᴘʟᴀʏᴇᴅ ʏᴇᴛ").setTimestamp()], flags: 64 });
             const text = docs.map((s, i) => `${"🥇🥈🥉"[i] ?? `\`#${i+1}\``} **${s.name}** — ${s.playCount} plays`).join("\n");
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("🏆 ᴍᴏsᴛ ᴘᴏᴘᴜʟᴀʀ sᴏᴜɴᴅs")).setDescription(sc(text)).setTimestamp()], flags: 64 });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🏆 ᴍᴏsᴛ ᴘᴏᴘᴜʟᴀʀ sᴏᴜɴᴅs").setDescription(text).setTimestamp()], flags: 64 });
           }
 
           if (sub === "delete") {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [makeEmbed({ title: sc("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: sc("admins only"), color: EmbedColors.ERROR, guild })], flags: 64 });
+            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [makeEmbed({ title: "❌ ᴘᴇʀᴍɪssɪᴏɴ", description: "ᴀᴅᴍɪɴs ᴏɴʟʏ", color: EmbedColors.ERROR, guild })], flags: 64 });
             const name = interaction.options.getString("name");
             const doc  = await Sound.findOne({ guildId, name });
-            if (!doc) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle(sc("❌ ɴᴏᴛ ғᴏᴜɴᴅ")).setDescription(sc("sound not found")).setTimestamp()], flags: 64 });
+            if (!doc) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.ERROR).setTitle("❌ ɴᴏᴛ ғᴏᴜɴᴅ").setDescription("sᴏᴜɴᴅ ɴᴏᴛ ꜰᴏᴜɴᴅ").setTimestamp()], flags: 64 });
             if (doc.storageMessageId) {
               const storageCh = guild.channels.cache.find(c => c.name === "soundboard-storage");
               if (storageCh) {
@@ -1351,26 +1338,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
             await doc.deleteOne();
             sbUpdatePanel(guild);
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle(sc("🗑 sᴏᴜɴᴅ ʀᴇᴍᴏᴠᴇᴅ")).setDescription(sc(`**${name}** removed`)).setTimestamp()] });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.SUCCESS).setTitle("🗑 sᴏᴜɴᴅ ʀᴇᴍᴏᴠᴇᴅ").setDescription(`**${name}** removed`).setTimestamp()] });
           }
 
           if (sub === "list") {
             const docs = await Sound.find({ guildId }).select("name playCount").sort({ name: 1 }).lean();
-            if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("📜 ᴇᴍᴘᴛʏ")).setDescription(sc("no sounds added")).setTimestamp()], flags: 64 });
+            if (!docs.length) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("📜 ᴇᴍᴘᴛʏ").setDescription("ɴᴏ sᴏᴜɴᴅs ᴀᴅᴅᴇᴅ").setTimestamp()], flags: 64 });
             const text = docs.slice(0, 40).map((s, i) => `\`${i+1}.\` **${s.name}** (${s.playCount} plays)`).join("\n");
             const more = docs.length > 40 ? `\n…and ${docs.length - 40} more` : "";
-            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("📜 sᴏᴜɴᴅ ʟɪsᴛ")).setDescription(sc(text + more)).setFooter({ text: sc(`${docs.length} sᴏᴜɴᴅs`) }).setTimestamp()], flags: 64 });
+            return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("📜 sᴏᴜɴᴅ ʟɪsᴛ").setDescription(text + more).setFooter({ text: `${docs.length} sᴏᴜɴᴅs` }).setTimestamp()], flags: 64 });
           }
 
           if (sub === "panel") {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [makeEmbed({ title: sc("❌ ᴘᴇʀᴍɪssɪᴏɴ"), description: sc("admins only"), color: EmbedColors.ERROR, guild })], flags: 64 });
+            if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ embeds: [makeEmbed({ title: "❌ ᴘᴇʀᴍɪssɪᴏɴ", description: "ᴀᴅᴍɪɴs ᴏɴʟʏ", color: EmbedColors.ERROR, guild })], flags: 64 });
             const ui  = await buildSoundPanelEmbed(guild);
             const msg = await interaction.reply({ embeds: [ui.embed], components: ui.buttons, withResponse: true });
             sbPanels.set(guildId, { messageId: msg.id, channelId: msg.channelId });
             return;
           }
 
-          return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle(sc("sound — usage")).setDescription(sc("/sound add|play|delete|list|panel|volume|top")).setTimestamp()], flags: 64 });
+          return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.INFO).setTitle("sᴏᴜɴᴅ — ᴜsᴀɢᴇ").setDescription("/sᴏᴜɴᴅ ᴀᴅᴅ|ᴘʟᴀʏ|ᴅᴇʟᴇᴛᴇ|ʟɪsᴛ|ᴘᴀɴᴇʟ|ᴠᴏʟᴜᴍᴇ|ᴛᴏᴘ").setTimestamp()], flags: 64 });
         }
       }
     }
@@ -1416,17 +1403,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const dmEmbed = new EmbedBuilder()
             .setColor(EmbedColors.SUCCESS)
             .setAuthor({
-              name: sc("✨ ʏᴏᴜ'ᴠᴇ ʙᴇᴇɴ ɪɴᴠɪᴛᴇᴅ!"),
+              name: "✨ ʏᴏᴜ'ᴠᴇ ʙᴇᴇɴ ɪɴᴠɪᴛᴇᴅ!",
               iconURL: member.user.displayAvatarURL({ dynamic: true })
             })
             .setDescription(
               `Hey <@${targetMember.id}>, **${member.displayName}** is calling you to join the vibes! 🎧\n\n` +
-              `> ${sc("📍 ᴄʜᴀɴɴᴇʟ:")} **${vc.name}**\n` +
-              `> ${sc("🌐 sᴇʀᴠᴇʀ:")} **${guild.name}**\n\n` +
+              `> ${"📍 ᴄʜᴀɴɴᴇʟ:"} **${vc.name}**\n` +
+              `> ${"🌐 sᴇʀᴠᴇʀ:"} **${guild.name}**\n\n` +
               `*Tap the button below to jump straight into the action.* 🚀`
             )
             .setThumbnail(guild.iconURL({ dynamic: true }) ?? undefined)
-            .setFooter({ text: sc("we're waiting for you...") })
+            .setFooter({ text: "ᴡᴇ'ʀᴇ ᴡᴀɪᴛɪɴɢ ꜰᴏʀ ʏᴏᴜ..." })
             .setTimestamp();
 
           const joinRow = new ActionRowBuilder().addComponents(
@@ -1444,7 +1431,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           if (dmSent) {
             return interaction.reply({
-              content: `✅ ${sc("ɪɴᴠɪᴛᴇ ᴅᴇʟɪᴠᴇʀᴇᴅ:")} **${targetMember.displayName}** has been summoned to your VC!`,
+              content: `✅ ${"ɪɴᴠɪᴛᴇ ᴅᴇʟɪᴠᴇʀᴇᴅ:"} **${targetMember.displayName}** has been summoned to your VC!`,
               flags: 64
             });
           }
@@ -1458,14 +1445,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const channelEmbed = new EmbedBuilder()
               .setColor(EmbedColors.VC_JOIN)
               .setAuthor({
-                name: sc("✨ ᴠᴄ ɪɴᴠɪᴛᴇ"),
+                name: "✨ ᴠᴄ ɪɴᴠɪᴛᴇ",
                 iconURL: member.user.displayAvatarURL({ dynamic: true })
               })
               .setDescription(
                 `Hey ${targetMember}! **${member.displayName}** wants you in **${vc.name}**.\n\n` +
                 `> *Don't leave them hanging — tap below to join the vibes!* 🎧`
               )
-              .setFooter({ text: sc(guild.name) })
+              .setFooter({ text: guild.name })
               .setTimestamp();
 
             await fallbackCh.send({
@@ -1475,13 +1462,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }).catch(() => {});
 
             return interaction.reply({
-              content: `📣 ${sc("ᴅᴍs ᴄʟᴏsᴇᴅ:")} Tagged **${targetMember.displayName}** in the channel instead.`,
+              content: `📣 ${"ᴅᴍs ᴄʟᴏsᴇᴅ:"} Tagged **${targetMember.displayName}** in the channel instead.`,
               flags: 64
             });
           }
 
           return interaction.reply({
-            content: `⚠️ ${sc("ᴍɪssɪᴏɴ ғᴀɪʟᴇᴅ:")} Couldn't reach **${targetMember.displayName}** (DMs closed, no fallback channel).`,
+            content: `⚠️ ${"ᴍɪssɪᴏɴ ғᴀɪʟᴇᴅ:"} Couldn't reach **${targetMember.displayName}** (DMs closed, no fallback channel).`,
             flags: 64
           });
         }
@@ -1495,7 +1482,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           if (customId === "sb_connect") {
             const res = await sbConnectToMember(member);
-            if (res?.error) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle(sc("🎧 join a vc first")).setDescription(sc("You need to be in a voice channel.")).setTimestamp()], flags: 64 });
+            if (res?.error) return interaction.reply({ embeds: [new EmbedBuilder().setColor(EmbedColors.WARNING).setTitle("🎧 ᴊᴏɪɴ ᴀ ᴠᴄ ꜰɪʀsᴛ").setDescription("ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ʙᴇ ɪɴ ᴀ ᴠᴏɪᴄᴇ ᴄʜᴀɴɴᴇʟ.").setTimestamp()], flags: 64 });
             q.vcId = res.channel.id;
             if (q.timeout) { clearTimeout(q.timeout); q.timeout = null; }
             await sbUpdatePanel(guild);
@@ -1534,7 +1521,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               new ButtonBuilder().setCustomId("confirmReset").setLabel("✅ Yes, Reset").setStyle(ButtonStyle.Danger),
               new ButtonBuilder().setCustomId("cancelReset").setLabel("❌ No, Cancel").setStyle(ButtonStyle.Secondary)
             );
-            return interaction.update({ embeds: [makeEmbed({ title: sc("⚠️ Confirm Reset"), description: sc("Reset all VC alert settings?"), color: EmbedColors.WARNING, guild })], components: [row] });
+            return interaction.update({ embeds: [makeEmbed({ title: "⚠️ ᴄᴏɴꜰɪʀᴍ ʀᴇsᴇᴛ", description: "ʀᴇsᴇᴛ ᴀʟʟ ᴠᴄ ᴀʟᴇʀᴛ sᴇᴛᴛɪɴɢs?", color: EmbedColors.WARNING, guild })], components: [row] });
           }
           case "confirmReset": {
             await GuildSettings.deleteOne({ guildId });
@@ -1542,7 +1529,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             settings = await getGuildSettings(guildId);
             const panel = buildControlPanel(settings, guild);
             await interaction.update({ embeds: [panel.embed], components: panel.buttons });
-            return interaction.followUp({ content: sc("🎉 Settings Reset!"), flags: 64 });
+            return interaction.followUp({ content: "🎉 sᴇᴛᴛɪɴɢs ʀᴇsᴇᴛ!", flags: 64 });
           }
           case "cancelReset": break;
           default: return;
@@ -1621,16 +1608,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const names  = sounds.map(s => s.name);
         if (sub === "add") {
           const existing = names.filter(n => n.toLowerCase().includes(focused)).slice(0, 25);
-          return interaction.respond(existing.length ? existing.map(n => ({ name: sc("⚠ " + n + " (exists)"), value: n })) : [{ name: sc("✅ new name"), value: focused || "" }]);
+          return interaction.respond(existing.length ? existing.map(n => ({ name: "⚠ " + n + " (ᴇxɪsᴛs)", value: n })) : [{ name: "✅ ɴᴇᴡ ɴᴀᴍᴇ", value: focused || "" }]);
         }
         const matches = names.filter(n => n.toLowerCase().includes(focused)).slice(0, 25);
-        return interaction.respond(matches.length ? matches.map(n => ({ name: sc("🎵 " + n), value: n })) : [{ name: sc("ɴᴏ ʀᴇsᴜʟᴛs"), value: "" }]);
+        return interaction.respond(matches.length ? matches.map(n => ({ name: "🎵 " + n, value: n })) : [{ name: "ɴᴏ ʀᴇsᴜʟᴛs", value: "" }]);
       }
     }
 
   } catch (err) {
     console.error("[InteractionCreate]", err?.stack ?? err?.message ?? err);
-    try { if (interaction && !interaction.replied) await interaction.reply({ content: sc("An error occurred. Please try again."), flags: 64 }); } catch (_) {}
+    try { if (interaction && !interaction.replied) await interaction.reply({ content: "ᴀɴ ᴇʀʀᴏʀ ᴏᴄᴄᴜʀʀᴇᴅ. ᴘʟᴇᴀsᴇ ᴛʀʏ ᴀɢᴀɪɴ.", flags: 64 }); } catch (_) {}
   }
 });
 
